@@ -1,4 +1,5 @@
 import os
+import json
 
 import pymupdf
 
@@ -30,6 +31,7 @@ INDEX_DIR = os.path.join(BASE_DIR, "paper_index")
 # 全局知识库
 
 db = None
+PAPER_SOURCE_PATH = os.path.join(INDEX_DIR, "source.json")
 
 
 def _get_embeddings():
@@ -100,6 +102,9 @@ def load_paper(pdf_path):
     # 持久化，重启后不用重新上传论文
     db.save_local(INDEX_DIR)
 
+    with open(PAPER_SOURCE_PATH, "w", encoding="utf-8") as source_file:
+        json.dump({"name": os.path.basename(pdf_path)}, source_file, ensure_ascii=False)
+
     print("论文索引已保存到:", INDEX_DIR)
 
     return len(chunks)
@@ -144,6 +149,25 @@ def ensure_db_loaded():
         return False
 
 
+def search_paper(question, k=4):
+
+    """只检索并返回论文原文片段，供 Agent 工具调用。"""
+
+    global db
+    ensure_db_loaded()
+    if db is None:
+        return []
+
+    try:
+        with open(PAPER_SOURCE_PATH, "r", encoding="utf-8") as source_file:
+            source_name = json.load(source_file).get("name", "当前论文索引")
+    except (OSError, ValueError, TypeError):
+        source_name = "当前论文索引（旧索引未记录文件名）"
+
+    docs = db.similarity_search(question, k=max(1, min(int(k), 6)))
+    return [{"source": source_name, "text": doc.page_content} for doc in docs]
+
+
 def ask_paper(question):
 
     """
@@ -152,28 +176,11 @@ def ask_paper(question):
 
     global db
 
-    # 保险起见，先看看磁盘上有没有可用的索引
-    ensure_db_loaded()
-
-    if db is None:
-
+    results = search_paper(question, k=4)
+    if not results:
         return "请先上传论文"
 
-    # 检索相关内容
-
-    docs = db.similarity_search(
-
-        question,
-
-        k=3
-
-    )
-
-    context = ""
-
-    for doc in docs:
-
-        context += doc.page_content + "\n"
+    context = "\n\n".join(item["text"] for item in results)
 
     prompt = f"""
 

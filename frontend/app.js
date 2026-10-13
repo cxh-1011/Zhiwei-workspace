@@ -766,7 +766,7 @@ function openChat(id) {
 
     apiJson("/messages/" + id)
 
-        .then(data => {
+        .then(async data => {
 
             const box = $("chat");
 
@@ -779,6 +779,8 @@ function openChat(id) {
             if (titleEl) titleEl.textContent = activeItem?.querySelector("span")?.textContent.trim() || "对话";
 
             const list = (data && data.data) ? data.data : [];
+            const traceData = await apiJson("/agent_runs?chat_id=" + encodeURIComponent(id)).catch(() => ({ items: [] }));
+            const traces = [...(traceData.items || [])];
 
             if (!list.length) {
                 addMessage("ai", MODE_INFO.chat.greeting);
@@ -787,9 +789,24 @@ function openChat(id) {
             }
 
             list.forEach(msg => {
-
+                if (msg[2] === "ai") {
+                    const traceIndex = traces.findIndex(item => item.reply === msg[3]);
+                    if (traceIndex >= 0) {
+                        const run = traces.splice(traceIndex, 1)[0];
+                        const bubble = document.createElement("div");
+                        bubble.className = "ai";
+                        if (Array.isArray(run.steps) && run.steps.length) {
+                            bubble.appendChild(renderAgentTrace(run.steps, run.status, run.rounds, run.duration_ms));
+                        }
+                        const answer = document.createElement("div");
+                        answer.className = "agent-answer";
+                        answer.innerHTML = renderMarkdown(msg[3]);
+                        bubble.appendChild(answer);
+                        box.appendChild(bubble);
+                        return;
+                    }
+                }
                 addMessage(msg[2], msg[3]);
-
             });
 
         })
@@ -846,9 +863,8 @@ async function sendMessage() {
     thinking.className = "ai thinking";
 
     thinking.innerHTML = `
-        <span></span>
-        <span></span>
-        <span></span>
+        <span></span><span></span><span></span>
+        <small>正在分析问题，并判断是否需要检索资料…</small>
     `;
 
     const chat = $("chat");
@@ -867,29 +883,16 @@ async function sendMessage() {
         // 没有当前会话就先建一个
         const chatId = await ensureChatId();
 
-        let path = "/chat";
-        let options = {
-
+        const data = await apiJson("/chat", {
             method: "POST",
-
-            headers: {
-
-                "Content-Type": "application/json"
-
-            },
-
-            body: JSON.stringify({ text: text, chat_id: chatId })
-        };
-
-        if (activeMode === "file") {
-            path = "/chat_file?filename=" + encodeURIComponent(selectedFilename) + "&question=" + encodeURIComponent(text) + "&chat_id=" + encodeURIComponent(chatId);
-            options = { method: "POST" };
-        } else if (activeMode === "paper") {
-            path = "/paper_chat";
-            options.body = JSON.stringify({ question: text, chat_id: chatId });
-        }
-
-        const data = await apiJson(path, options);
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                text: text,
+                chat_id: chatId,
+                mode: activeMode || "chat",
+                filename: activeMode === "file" ? selectedFilename : null
+            })
+        });
 
         thinking.remove();
 
@@ -907,15 +910,23 @@ async function sendMessage() {
 
         chat.appendChild(div);
 
+        if (Array.isArray(data.steps) && data.steps.length) {
+            div.appendChild(renderAgentTrace(data.steps, data.status, data.rounds, data.duration_ms));
+        }
+
+        const answer = document.createElement("div");
+        answer.className = "agent-answer";
+        div.appendChild(answer);
+
         // 判断音乐卡片
         if (activeMode === "chat" && isMusicReply(reply)) {
 
-            div.innerHTML = createMusicCard(reply);
+            answer.innerHTML = createMusicCard(reply);
 
         } else {
 
             // 普通AI回答逐字显示
-            typeWriter(div, reply, 30);
+            typeWriter(answer, reply, 30);
 
         }
 
@@ -1016,6 +1027,84 @@ function typeWriter(element, text, speed = 30) {
 
     }, speed);
 
+}
+
+function renderAgentTrace(steps, status, rounds, durationMs) {
+    const details = document.createElement("details");
+    details.className = "agent-trace";
+    const summary = document.createElement("summary");
+    const tools = steps.filter(step => step.kind === "tool_call");
+    const headline = tools.length
+        ? `已调用 ${tools.length} 个工具 · ${rounds || 1} 轮 · ${((durationMs || 0) / 1000).toFixed(1)} 秒`
+        : `分析完成 · ${((durationMs || 0) / 1000).toFixed(1)} 秒`;
+    summary.textContent = "⚙　" + headline;
+    details.appendChild(summary);
+    const list = document.createElement("ol");
+    list.className = "agent-trace-list";
+    const labels = {
+        web_search: "联网搜索",
+        paper_search: "检索论文",
+        search_uploaded_files: "检索上传资料",
+        list_uploaded_files: "查看资料列表"
+    };
+    steps.forEach(step => {
+        const item = document.createElement("li");
+        const title = document.createElement("strong");
+        if (step.kind === "tool_call") {
+            title.textContent = (step.ok ? "✓ " : "! ") + (labels[step.tool] || step.tool);
+            item.className = step.ok ? "trace-ok" : "trace-error";
+            const query = step.args && (step.args.query || step.args.question);
+            if (query) {
+                const queryLine = document.createElement("div");
+                queryLine.className = "trace-detail";
+                queryLine.textContent = "检索内容：" + query;
+                item.appendChild(title);
+                item.appendChild(queryLine);
+            } else item.appendChild(title);
+            if (step.elapsed_ms != null) {
+                const time = document.createElement("span");
+                time.className = "trace-time";
+                time.textContent = `${step.elapsed_ms} ms`;
+                item.appendChild(time);
+            }
+            if (step.result_preview) {
+                const preview = document.createElement("p");
+                preview.className = "trace-preview";
+                preview.textContent = step.result_preview;
+                item.appendChild(preview);
+            }
+        } else if (step.kind === "limit") {
+            title.textContent = "达到保护限制";
+            item.className = "trace-limit";
+            item.appendChild(title);
+            const reason = document.createElement("p");
+            reason.textContent = step.reason || step.detail || "本次运行已安全停止。";
+            item.appendChild(reason);
+        } else if (step.kind === "error") {
+            title.textContent = "处理遇到问题";
+            item.className = "trace-error";
+            item.appendChild(title);
+            const reason = document.createElement("p");
+            reason.textContent = step.detail || "模型调用失败。";
+            item.appendChild(reason);
+        } else if (step.kind === "final") {
+            title.textContent = "整理最终回答";
+            item.appendChild(title);
+        } else {
+            title.textContent = "分析问题";
+            item.appendChild(title);
+        }
+        list.appendChild(item);
+    });
+    details.appendChild(list);
+    if (status && status !== "ok") {
+        const notice = document.createElement("div");
+        notice.className = "trace-status";
+        notice.textContent = status === "max_rounds" ? "已达到最大工具调用轮数，回答可能不完整。" :
+            status === "timeout" ? "本次运行达到时间上限，回答基于已有资料。" : "本次运行未能完整完成。";
+        details.appendChild(notice);
+    }
+    return details;
 }
 
 
@@ -1836,5 +1925,145 @@ async function logout() {
     currentChatId = null;
     clearChat();
     showLoginGate();
+}
+
+async function openLearningHub() {
+    const dialog = $("learningHub");
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    await Promise.allSettled([loadMemories(), loadLearningPlans()]);
+}
+
+function closeLearningHub() {
+    const dialog = $("learningHub");
+    if (dialog?.open) dialog.close();
+}
+
+async function loadMemories() {
+    const box = $("memoryList");
+    if (!box) return;
+    try {
+        const data = await apiJson("/memories");
+        box.replaceChildren();
+        const items = data.items || [];
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-hint">还没有保存的记忆。</div>';
+            return;
+        }
+        items.forEach(item => {
+            const card = document.createElement("article");
+            card.className = "hub-item";
+            const category = document.createElement("span");
+            category.className = "hub-category";
+            category.textContent = item.category || "记忆";
+            const content = document.createElement("p");
+            content.textContent = item.content;
+            const remove = document.createElement("button");
+            remove.className = "hub-remove";
+            remove.textContent = "删除";
+            remove.onclick = async () => {
+                try {
+                    await apiJson("/memories/" + item.id, { method: "DELETE" });
+                    loadMemories();
+                } catch (error) { alert("删除记忆失败：" + error.message); }
+            };
+            card.append(category, remove, content);
+            box.appendChild(card);
+        });
+    } catch (error) {
+        box.textContent = "读取记忆失败：" + error.message;
+    }
+}
+
+async function saveLearningMemory(event) {
+    event.preventDefault();
+    const content = $("memoryContent")?.value.trim() || "";
+    const category = $("memoryCategory")?.value.trim() || "偏好";
+    if (!content) return;
+    try {
+        await apiJson("/memories", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content, category })
+        });
+        $("memoryContent").value = "";
+        await loadMemories();
+    } catch (error) {
+        alert("保存记忆失败：" + error.message);
+    }
+}
+
+async function loadLearningPlans() {
+    const box = $("planList");
+    if (!box) return;
+    try {
+        const data = await apiJson("/learning_plans");
+        box.replaceChildren();
+        const items = data.items || [];
+        if (!items.length) {
+            box.innerHTML = '<div class="empty-hint">还没有学习计划。</div>';
+            return;
+        }
+        items.forEach(plan => {
+            const card = document.createElement("details");
+            card.className = "hub-item plan-item";
+            const summary = document.createElement("summary");
+            summary.textContent = (plan.status === "done" ? "✓ " : "◷ ") + plan.title;
+            const goal = document.createElement("p");
+            goal.className = "learning-help";
+            goal.textContent = "目标：" + plan.goal;
+            const content = document.createElement("div");
+            content.className = "plan-content";
+            content.textContent = plan.content;
+            const actions = document.createElement("div");
+            actions.className = "hub-item-actions";
+            const toggle = document.createElement("button");
+            toggle.textContent = plan.status === "done" ? "设为进行中" : "标记完成";
+            toggle.onclick = async () => {
+                const status = plan.status === "done" ? "active" : "done";
+                try {
+                    await apiJson(`/learning_plans/${plan.id}?status=${status}`, { method: "PATCH" });
+                    loadLearningPlans();
+                } catch (error) { alert("更新计划失败：" + error.message); }
+            };
+            const remove = document.createElement("button");
+            remove.className = "hub-remove";
+            remove.textContent = "删除";
+            remove.onclick = async () => {
+                try {
+                    await apiJson("/learning_plans/" + plan.id, { method: "DELETE" });
+                    loadLearningPlans();
+                } catch (error) { alert("删除计划失败：" + error.message); }
+            };
+            actions.append(toggle, remove);
+            card.append(summary, goal, content, actions);
+            box.appendChild(card);
+        });
+    } catch (error) {
+        box.textContent = "读取学习计划失败：" + error.message;
+    }
+}
+
+async function generateLearningPlan(event) {
+    event.preventDefault();
+    const goal = $("planGoal")?.value.trim() || "";
+    const button = $("generatePlanBtn");
+    if (!goal || !button) return;
+    button.disabled = true;
+    button.textContent = "正在生成…";
+    try {
+        await apiJson("/learning_plans/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ goal })
+        });
+        $("planGoal").value = "";
+        await loadLearningPlans();
+    } catch (error) {
+        alert("生成计划失败：" + error.message);
+    } finally {
+        button.disabled = false;
+        button.textContent = "生成并保存计划";
+    }
 }
 

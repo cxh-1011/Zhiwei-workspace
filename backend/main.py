@@ -2,12 +2,14 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import hashlib
 import hmac
 import os
 import time
+import logging
+import re
 
 
 # ======================
@@ -23,113 +25,27 @@ FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 # AI助手角色设定
 # ======================
 
-SYSTEM_PROMPT = """
-你是一个智能AI助手。
-
-你同时具备音乐推荐能力。
-
-
-规则：
-
-如果用户询问音乐、歌曲、歌单，
-或者表达自己的情绪：
-
-例如：
-我很难过
-我压力很大
-我睡不着
-推荐几首歌
-适合学习听什么歌
-
-
-请进入音乐助手模式。
-
-
-必须严格输出以下格式：
-
-
-[MUSIC_CARD]
-
-歌曲名: 歌曲名称
-
-歌手: 歌手名称
-
-理由: 推荐理由
-
-[/MUSIC_CARD]
-
-
-
-一次输出3首歌曲。
-
-
-注意：
-
-1. [MUSIC_CARD] 必须出现。
-2. 不允许改成其他格式。
-3. 不要输出：
-歌曲名：
-然后下一行写内容。
-
-必须同一行。
-
-
-正确：
-
-歌曲名: 晚安
-
-错误：
-
-歌曲名:
-晚安
-
-
-
-如果用户不是音乐相关问题：
-
-正常回答即可。
-
-"""
-
-
-import dashscope
-from dashscope import Generation
-from tavily import TavilyClient
+from agent import run_agent
+from llm import chat_completion
 
 from config import (
-    DASHSCOPE_API_KEY,
-    TAVILY_API_KEY,
     APP_PASSWORD_HASH,
     APP_SECRET_KEY,
     APP_COOKIE_SECURE
 )
 
-from paper_agent import load_paper, ask_paper, ensure_db_loaded
+from paper_agent import load_paper, ensure_db_loaded
 
 from database import (
-
-    init_db,
-
-    create_chat,
-
-    get_chats,
-
-    delete_chat,
-
-    save_message,
-
-    get_messages,
-
-    update_chat_title
-
+    init_db, create_chat, get_chats, delete_chat, save_message,
+    get_messages, update_chat_title, get_recent_messages, save_agent_run,
+    get_agent_run, get_agent_runs_for_chat, add_memory, list_memories, delete_memory,
+    save_learning_plan, list_learning_plans, set_learning_plan_status,
+    delete_learning_plan,
 )
 
 
-# ======================
-# 千问API
-# ======================
-
-dashscope.api_key = DASHSCOPE_API_KEY
+logger = logging.getLogger("ai_robot")
 
 
 # ======================
@@ -137,14 +53,6 @@ dashscope.api_key = DASHSCOPE_API_KEY
 # ======================
 
 app = FastAPI(title="AI智能机器人")
-
-
-# 联网搜索客户端
-# 没配置 TAVILY_API_KEY 时用占位符，避免启动就报错；
-# 真正要用的时候会在 chat() 里判断，没有 key 就跳过联网。
-tavily = TavilyClient(
-    api_key=TAVILY_API_KEY or "tvly-not-configured"
-)
 
 
 # ======================
@@ -273,9 +181,11 @@ ensure_db_loaded()
 
 class Message(BaseModel):
 
-    text: str
+    text: str = Field(..., min_length=1, max_length=12000)
 
-    chat_id: int
+    chat_id: int = Field(..., gt=0)
+    mode: str = "chat"
+    filename: str | None = None
 
 
 class PaperQuestion(BaseModel):
@@ -286,6 +196,15 @@ class PaperQuestion(BaseModel):
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class MemoryRequest(BaseModel):
+    content: str
+    category: str = "偏好"
+
+
+class PlanRequest(BaseModel):
+    goal: str
 
 
 @app.get("/auth/status")
@@ -321,156 +240,42 @@ def logout(response: Response):
 
 @app.post("/chat")
 def chat(message: Message):
-
     try:
+        if message.mode not in {"chat", "file", "paper"}:
+            raise HTTPException(status_code=400, detail="未知的对话模式。")
+        selected_filename = None
+        if message.mode == "file":
+            selected_filename = os.path.basename((message.filename or "").replace("\\", "/"))
+            if not selected_filename or selected_filename != message.filename.replace("\\", "/"):
+                raise HTTPException(status_code=400, detail="请选择有效的上传文件。")
+            if not os.path.isfile(os.path.join(UPLOAD_DIR, selected_filename)):
+                raise HTTPException(status_code=404, detail="指定资料不存在，请重新选择或上传。")
 
-        # ======================
-        # 判断是否需要联网
-        # ======================
-
-        need_search_words = [
-
-            "新闻",
-
-            "今天",
-
-            "最新",
-
-            "最近",
-
-            "现在",
-
-            "价格",
-
-            "天气",
-
-            "股票",
-
-            "比赛"
-
+        history = [
+            {"role": "assistant" if role == "ai" else "user", "content": content}
+            for role, content in get_recent_messages(message.chat_id, 12)
+            if role in {"user", "ai"}
         ]
+        memories = list_memories(20)
+        memory_context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
+        active_plans = [row for row in list_learning_plans(10) if row[4] == "active"][:3]
+        if active_plans:
+            memory_context += "\n当前学习计划：\n" + "\n".join(f"- {row[1]}：{row[2]}" for row in active_plans)
 
-        need_search = any(
-
-            word in message.text
-
-            for word in need_search_words
-
+        result = run_agent(
+            message.text, history=history, mode=message.mode,
+            filename=selected_filename, memory_context=memory_context,
         )
-
-        # 没有配置 Tavily key 时，直接跳过联网，保证聊天本身可用
-        if need_search and not TAVILY_API_KEY:
-
-            need_search = False
-
-        # ======================
-        # 联网搜索
-        # ======================
-
-        if need_search:
-
-            search_result = tavily.search(
-
-                query=message.text,
-
-                max_results=3
-
-            )
-
-            web_content = ""
-
-            for item in search_result["results"]:
-
-                web_content += item["content"] + "\n"
-
-            prompt = f"""
-
-{SYSTEM_PROMPT}
-
-
-联网搜索内容：
-
-{web_content}
-
-
-用户问题：
-
-{message.text}
-
-
-请结合以上内容回答。
-
-"""
-
-        else:
-
-            prompt = f"""
-
-{SYSTEM_PROMPT}
-
-
-用户问题：
-
-{message.text}
-
-
-请回答用户。
-
-"""
-
-        # ======================
-        # 调用千问
-        # ======================
-
-        response = Generation.call(
-
-            model="qwen-plus",
-
-            prompt=prompt
-
-        )
-
-        ai_text = response.output.text
-
-        # 自动修改聊天标题
-        update_chat_title(
-
-            message.chat_id,
-
-            message.text[:15]
-
-        )
-
-        # 保存用户消息
-        save_message(
-
-            message.chat_id,
-
-            "user",
-
-            message.text
-
-        )
-
-        # 保存AI消息
-        save_message(
-
-            message.chat_id,
-
-            "ai",
-
-            ai_text
-
-        )
-
-        return {
-
-            "reply": ai_text
-
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=502, detail="AI 对话暂时不可用，请稍后重试。") from e
+        update_chat_title(message.chat_id, message.text[:15])
+        save_message(message.chat_id, "user", message.text)
+        save_message(message.chat_id, "ai", result["reply"])
+        save_agent_run(message.chat_id, message.text, result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Agent 聊天接口失败 | chat_id=%s", message.chat_id)
+        raise HTTPException(status_code=502, detail="AI 对话暂时不可用，请稍后重试。") from exc
 
 
 # ======================
@@ -542,18 +347,18 @@ def messages(chat_id: int):
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
 
-    filename = os.path.basename(file.filename or "upload.bin")
+    filename = os.path.basename((file.filename or "upload.bin").replace("\\", "/"))
 
     if os.path.splitext(filename)[1].lower() not in {".txt", ".pdf", ".docx"}:
         raise HTTPException(status_code=415, detail="仅支持 TXT、PDF 和 DOCX 文件。")
 
-    content = await file.read()
+    content = await file.read(20 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="文件内容为空。")
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="文件不能超过 20 MB。")
 
-    path = os.path.join(UPLOAD_DIR, filename)
+    path = _unique_upload_path(filename)
 
     with open(path, "wb") as f:
 
@@ -561,7 +366,7 @@ async def upload_file(file: UploadFile = File(...)):
 
     return {
 
-        "filename": filename,
+        "filename": os.path.basename(path),
 
         "message": "上传成功"
 
@@ -575,18 +380,18 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/upload_paper")
 async def upload_paper(file: UploadFile = File(...)):
 
-    filename = os.path.basename(file.filename or "paper.pdf")
+    filename = os.path.basename((file.filename or "paper.pdf").replace("\\", "/"))
 
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=415, detail="论文助手仅支持 PDF 文件。")
 
-    content = await file.read()
+    content = await file.read(50 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="PDF 文件内容为空。")
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="论文不能超过 50 MB。")
 
-    path = os.path.join(UPLOAD_DIR, filename)
+    path = _unique_upload_path(filename)
 
     with open(path, "wb") as f:
 
@@ -598,7 +403,7 @@ async def upload_paper(file: UploadFile = File(...)):
 
         "message": "论文解析完成",
 
-        "filename": filename,
+        "filename": os.path.basename(path),
 
         "chunks": count
 
@@ -611,23 +416,7 @@ async def upload_paper(file: UploadFile = File(...)):
 
 @app.post("/paper_chat")
 def paper_chat(data: PaperQuestion):
-
-    answer = ask_paper(
-
-        data.question
-
-    )
-
-    if data.chat_id is not None:
-        update_chat_title(data.chat_id, data.question[:15])
-        save_message(data.chat_id, "user", data.question)
-        save_message(data.chat_id, "ai", answer)
-
-    return {
-
-        "reply": answer
-
-    }
+    return _run_legacy_agent(data.question, data.chat_id, mode="paper")
 
 
 @app.get("/paper_status")
@@ -644,7 +433,10 @@ def files():
 
     return {
 
-        "files": sorted(os.listdir(UPLOAD_DIR))
+        "files": sorted(
+            name for name in os.listdir(UPLOAD_DIR)
+            if os.path.splitext(name)[1].lower() in {".txt", ".pdf", ".docx"}
+        )
 
     }
 
@@ -717,60 +509,119 @@ def read_file(path):
 
 @app.post("/chat_file")
 def chat_file(filename: str, question: str, chat_id: int | None = None):
+    safe_name = os.path.basename(filename.replace("\\", "/"))
+    if safe_name != filename.replace("\\", "/"):
+        raise HTTPException(status_code=400, detail="文件名无效。")
+    if not os.path.isfile(os.path.join(UPLOAD_DIR, safe_name)):
+        raise HTTPException(status_code=404, detail="没有找到这份资料。")
+    return _run_legacy_agent(question, chat_id, mode="file", filename=safe_name)
 
+
+def _unique_upload_path(filename: str) -> str:
+    stem, ext = os.path.splitext(filename)
+    candidate = os.path.join(UPLOAD_DIR, filename)
+    number = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(UPLOAD_DIR, f"{stem} ({number}){ext}")
+        number += 1
+    return candidate
+
+
+def _run_legacy_agent(question: str, chat_id: int | None, mode: str, filename: str | None = None):
     try:
-
-        safe_name = os.path.basename(filename)
-
-        content = read_file(
-
-            os.path.join(UPLOAD_DIR, safe_name)
-
-        )
-
-        prompt = f"""
-
-你是一个文件分析助手。
-
-
-文件内容：
-
-{content}
-
-
-
-用户问题：
-
-{question}
-
-
-
-请根据文件内容回答。
-
-"""
-
-        response = Generation.call(
-
-            model="qwen-plus",
-
-            prompt=prompt
-
-        )
-
-        answer = response.output.text
+        history = []
+        memories = list_memories(20)
+        context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
+        result = run_agent(question, history=history, mode=mode, filename=filename, memory_context=context)
         if chat_id is not None:
             update_chat_title(chat_id, question[:15])
             save_message(chat_id, "user", question)
-            save_message(chat_id, "ai", answer)
+            save_message(chat_id, "ai", result["reply"])
+            save_agent_run(chat_id, question, result)
+        return result
+    except Exception as exc:
+        logger.exception("兼容问答接口失败")
+        raise HTTPException(status_code=502, detail="AI 对话暂时不可用，请稍后重试。") from exc
 
-        return {
 
-            "reply": answer
+@app.get("/agent_runs/{run_id}")
+def agent_run(run_id: str):
+    result = get_agent_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="没有找到这次 Agent 运行记录。")
+    return result
 
-        }
 
-    except Exception as e:
-        raise HTTPException(status_code=422, detail="文件分析失败：" + str(e)) from e
+@app.get("/agent_runs")
+def agent_runs(chat_id: int):
+    return {"items": get_agent_runs_for_chat(chat_id)}
+
+
+@app.get("/memories")
+def memories():
+    return {"items": [
+        {"id": row[0], "content": row[1], "category": row[2], "created_at": row[3]}
+        for row in list_memories(100)
+    ]}
+
+
+@app.post("/memories")
+def create_memory(data: MemoryRequest):
+    content = data.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="记忆内容不能为空。")
+    memory_id = add_memory(content, data.category.strip() or "偏好")
+    return {"id": memory_id, "message": "已保存到长期记忆。"}
+
+
+@app.delete("/memories/{memory_id}")
+def remove_memory(memory_id: int):
+    if not delete_memory(memory_id):
+        raise HTTPException(status_code=404, detail="没有找到这条记忆。")
+    return {"message": "记忆已删除。"}
+
+
+@app.get("/learning_plans")
+def learning_plans():
+    return {"items": [
+        {"id": row[0], "title": row[1], "goal": row[2], "content": row[3], "status": row[4], "created_at": row[5]}
+        for row in list_learning_plans(50)
+    ]}
+
+
+@app.post("/learning_plans/generate")
+def generate_learning_plan(data: PlanRequest):
+    goal = data.goal.strip()[:1000]
+    if not goal:
+        raise HTTPException(status_code=400, detail="请先写下学习目标。")
+    context = "\n".join(f"[{row[2]}] {row[1]}" for row in list_memories(20))
+    prompt = [
+        {"role": "system", "content": "你是一位适合研究生新手的学习规划助手。请用中文制定现实、循序渐进、每项可检查的一周学习计划。不要假设用户已经掌握高级知识。输出 Markdown，按天列出目标、任务和完成标准。"},
+        {"role": "user", "content": f"学习目标：{goal}\n个人背景与记忆：\n{context or '暂未提供'}"},
+    ]
+    try:
+        response, _ = chat_completion(prompt, tools=None, timeout=35)
+        content = getattr(response, "content", None) or "暂时无法生成计划，请调整目标后重试。"
+    except Exception as exc:
+        logger.exception("生成学习计划失败")
+        raise HTTPException(status_code=502, detail="学习计划暂时无法生成，请稍后重试。") from exc
+    title = "一周学习计划：" + goal[:60]
+    plan_id = save_learning_plan(title, goal, content)
+    return {"id": plan_id, "title": title, "goal": goal, "content": content, "status": "active"}
+
+
+@app.patch("/learning_plans/{plan_id}")
+def update_learning_plan(plan_id: int, status: str):
+    if not set_learning_plan_status(plan_id, status):
+        raise HTTPException(status_code=404, detail="计划不存在或状态不正确。")
+    return {"message": "学习计划状态已更新。"}
+
+
+@app.delete("/learning_plans/{plan_id}")
+def remove_learning_plan(plan_id: int):
+    if not delete_learning_plan(plan_id):
+        raise HTTPException(status_code=404, detail="没有找到这份学习计划。")
+    return {"message": "学习计划已删除。"}
 
 
 # ======================

@@ -9,6 +9,7 @@ pydantic
 # ===== 大模型 / 联网搜索 =====
 dashscope
 tavily-python
+openai
 
 # ===== 文档解析 =====
 pypdf

@@ -17,6 +17,7 @@
       <a class="brand" href="/" aria-label="知微首页"><span class="brand-mark"><i></i><i></i><i></i></span><span><strong>知微</strong><small>AI WORKSPACE</small></span></a>
       <div class="topbar-actions">
         <button class="top-action" id="historyToggle" onclick="toggleHistory()">◷ <span>对话记录</span></button>
+        <button class="top-action" id="learningHubBtn" onclick="openLearningHub()">▣ <span>学习档案</span></button>
         <button class="top-action" onclick="newChat()">＋ <span>新对话</span></button>
         <button class="top-action" id="logoutBtn" onclick="logout()">↪ <span>退出登录</span></button>
         <span class="model-pill"><span class="model-dot"></span>Qwen Plus</span>
@@ -67,6 +68,19 @@
     </footer>
     <div class="sidebar-footer"><span id="serviceDot" class="status-dot"></span><span id="serviceLabel">正在连接服务…</span><a href="debug.html" target="_blank" rel="noopener">连接诊断</a></div>
   </main>
+  <dialog id="learningHub" class="learning-hub">
+    <div class="learning-head"><div><span class="eyebrow">YOUR LEARNING SPACE</span><h2>学习档案</h2><p>由你确认保存的长期记忆与学习计划会用于个性化回答。</p></div><button class="hub-close" onclick="closeLearningHub()" aria-label="关闭">×</button></div>
+    <div class="learning-grid">
+      <section class="learning-section"><h3>长期记忆</h3><p class="learning-help">只保存你主动添加的内容；回答时千问会参考这些信息。</p>
+        <form id="memoryForm" onsubmit="saveLearningMemory(event)"><input id="memoryCategory" maxlength="40" placeholder="分类，例如：研究方向" value="偏好"><textarea id="memoryContent" maxlength="1200" required placeholder="例如：我刚读研一，正在学习机器学习基础。"></textarea><button class="hub-primary" type="submit">保存记忆</button></form>
+        <div id="memoryList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
+      </section>
+      <section class="learning-section"><h3>一周学习计划</h3><p class="learning-help">写下目标，千问会结合已保存的背景生成可执行计划。</p>
+        <form id="planForm" onsubmit="generateLearningPlan(event)"><textarea id="planGoal" maxlength="1000" required placeholder="例如：一周内理解 Transformer 的基本结构和注意力机制"></textarea><button class="hub-primary" id="generatePlanBtn" type="submit">生成并保存计划</button></form>
+        <div id="planList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
+      </section>
+    </div>
+  </dialog>
   <section id="loginGate" class="login-gate" hidden>
     <form class="login-card" onsubmit="submitLogin(event)">
       <div class="login-brand"><span class="brand-mark"><i></i><i></i><i></i></span><span><strong>知微</strong><small>PRIVATE AI WORKSPACE</small></span></div>
