@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta name="description" content="集成智能对话、文件问答与论文阅读的 AI 工作空间">
+  <title>知微 · AI 工作空间</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="知微首页"><span class="brand-mark"><i></i><i></i><i></i></span><span><strong>知微</strong><small>AI WORKSPACE</small></span></a>
+      <div class="topbar-actions">
+        <button class="top-action" id="historyToggle" onclick="toggleHistory()">◷ <span>对话记录</span></button>
+        <button class="top-action" onclick="newChat()">＋ <span>新对话</span></button>
+        <button class="top-action" id="logoutBtn" onclick="logout()">↪ <span>退出登录</span></button>
+        <span class="model-pill"><span class="model-dot"></span>Qwen Plus</span>
+      </div>
+      <div id="historyPanel" class="history-panel" hidden><div class="history-heading">最近对话 <button onclick="toggleHistory(false)" aria-label="关闭">×</button></div><div id="chatList" class="chat-list"><div class="empty-hint">正在加载…</div></div></div>
+    </header>
+
+    <div id="connBanner" class="conn-banner" style="display:none"></div>
+    <section id="chat" class="conversation" aria-live="polite" aria-label="与 AI 对话">
+      <div id="welcome" class="welcome">
+        <div class="welcome-orb"><i></i><i></i><i></i></div>
+        <div class="eyebrow">YOUR THINKING PARTNER</div>
+        <h1>你好，今天想用 AI 做什么？</h1>
+        <p>先选择一个功能，接下来的提问和回答都会在这里进行。</p>
+        <div class="mode-grid">
+          <button class="mode-card" onclick="selectMode('chat')"><span class="mode-icon blue">✳</span><span><b>智能对话</b><small>自由提问、灵感探索与音乐推荐</small></span><span class="mode-arrow">↗</span></button>
+          <button class="mode-card" onclick="selectMode('file')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传 PDF、DOCX 或 TXT，基于资料提问</small></span><span class="mode-arrow">↗</span></button>
+          <button class="mode-card" onclick="selectMode('paper')"><span class="mode-icon amber">论</span><span><b>论文助手</b><small>解析 PDF 论文，检索内容并深入讨论</small></span><span class="mode-arrow">↗</span></button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="composer-wrap">
+      <div id="modeBar" class="mode-bar" hidden>
+        <button id="activeModeButton" class="active-mode" onclick="toggleModePicker()"><span id="activeModeIcon">✳</span><span id="activeModeName">智能对话</span><span class="mode-chevron">⌄</span></button>
+        <div id="modePicker" class="mode-picker" hidden>
+          <button onclick="selectMode('chat')">✳　智能对话</button><button onclick="selectMode('file')">▤　文件问答</button><button onclick="selectMode('paper')">论　论文助手</button>
+        </div>
+        <span id="contextName" class="context-name"></span>
+        <div class="mode-actions">
+          <label id="filePickerLabel" class="attach-button" for="fileInput" hidden>＋ 添加资料</label>
+          <select id="fileList" class="file-select" aria-label="选择已上传资料" hidden onchange="selectExistingFile()"><option value="">选择已上传资料</option></select>
+          <label id="paperPickerLabel" class="attach-button" for="paperInput" hidden>＋ 选择论文</label>
+          <button id="uploadPaperBtn" class="attach-button" onclick="uploadPaper()" hidden>解析论文</button>
+        </div>
+      </div>
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt" onchange="showSelectedFile('fileInput','fileSelectedName')">
+      <input type="file" id="paperInput" accept=".pdf,application/pdf" onchange="showSelectedFile('paperInput','paperFileName')">
+      <input type="hidden" id="fileName"><input type="hidden" id="fileQuestion"><input type="hidden" id="paperQuestion">
+      <span id="fileSelectedName" hidden>未选择文件</span><span id="paperFileName" hidden>未选择论文</span>
+      <div id="fileAnswer" hidden></div><div id="paperAnswer" hidden></div>
+      <div id="paperStatus" class="upload-status" hidden></div>
+      <div class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="先选择一个功能…" aria-label="输入消息" disabled></textarea>
+        <div class="composer-bottom"><span class="composer-hint"><span class="sparkle">✦</span> <span id="composerHint">选择功能后即可开始</span></span><button id="sendBtn" class="send-button" onclick="sendMessage()" aria-label="发送消息" disabled><span>发送</span><span class="send-arrow">↑</span></button></div>
+      </div>
+      <div class="composer-note">知微 AI · 让知识触手可及</div>
+    </footer>
+    <div class="sidebar-footer"><span id="serviceDot" class="status-dot"></span><span id="serviceLabel">正在连接服务…</span><a href="debug.html" target="_blank" rel="noopener">连接诊断</a></div>
+  </main>
+  <section id="loginGate" class="login-gate" hidden>
+    <form class="login-card" onsubmit="submitLogin(event)">
+      <div class="login-brand"><span class="brand-mark"><i></i><i></i><i></i></span><span><strong>知微</strong><small>PRIVATE AI WORKSPACE</small></span></div>
+      <div class="login-eyebrow">欢迎回来</div>
+      <h1>登录你的工作空间</h1>
+      <p>请输入访问密码以继续使用。</p>
+      <label class="login-label" for="loginPassword">访问密码</label>
+      <input id="loginPassword" class="login-input" type="password" autocomplete="current-password" placeholder="输入访问密码" required>
+      <div id="loginError" class="login-error" role="alert"></div>
+      <button id="loginBtn" class="login-submit" type="submit">进入工作空间 <span>↗</span></button>
+      <small class="login-footnote">登录状态有效期为 12 小时</small>
+    </form>
+  </section>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

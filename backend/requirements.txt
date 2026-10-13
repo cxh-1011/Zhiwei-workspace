@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+# ===== 后端框架 =====
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+pydantic
+
+# ===== 大模型 / 联网搜索 =====
+dashscope
+tavily-python
+
+# ===== 文档解析 =====
+pypdf
+python-docx
+pymupdf
+
+# ===== 论文向量检索 =====
+langchain-community
+langchain-text-splitters
+langchain-core
+faiss-cpu

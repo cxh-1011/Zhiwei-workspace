@@ -1,0 +1,33 @@
+# Secrets and local configuration
+.env
+*.env
+!*.env.example
+backend/.env
+
+# User data and runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/paper_index/
+*.faiss
+*.pkl
+backend/logs/
+*.log
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Backups and editor files
+backups/
+frontend/.well-known/acme-challenge/*
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

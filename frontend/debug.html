@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>接口连接自检 - AI智能机器人</title>
+
+    <style>
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: "Microsoft YaHei", Arial, sans-serif;
+            background: #f5f8ff;
+            color: #1f2937;
+            line-height: 1.6;
+        }
+
+        .wrap { max-width: 900px; margin: 0 auto; }
+
+        h1 { font-size: 20px; color: #1e3a8a; margin: 0 0 6px; }
+
+        .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
+
+        .card {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 16px 18px;
+            margin-bottom: 16px;
+        }
+
+        .card h2 {
+            font-size: 15px;
+            margin: 0 0 10px;
+            color: #1e3a8a;
+        }
+
+        .row {
+            padding: 8px 0;
+            border-bottom: 1px dashed #eef2f7;
+            font-size: 13px;
+            word-break: break-all;
+        }
+
+        .row:last-child { border-bottom: none; }
+
+        .url { color: #334155; font-family: Consolas, monospace; font-size: 12px; }
+
+        .badge {
+            display: inline-block;
+            padding: 1px 8px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-right: 6px;
+        }
+
+        .b-ok { background: #dcfce7; color: #166534; }
+        .b-warn { background: #fef3c7; color: #92400e; }
+        .b-bad { background: #fee2e2; color: #b91c1c; }
+        .b-info { background: #e0e7ff; color: #3730a3; }
+
+        .note { color: #64748b; font-size: 12px; }
+
+        button {
+            padding: 9px 16px;
+            border: none;
+            border-radius: 9px;
+            background: #2563eb;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            margin-right: 8px;
+        }
+
+        button.gray { background: #e2e8f0; color: #334155; }
+        button:disabled { opacity: .6; cursor: not-allowed; }
+
+        pre {
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 14px;
+            border-radius: 10px;
+            font-size: 12px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 420px;
+        }
+
+        .verdict {
+            font-size: 14px;
+            line-height: 1.9;
+        }
+
+        .verdict b { color: #b91c1c; }
+
+    </style>
+
+</head>
+
+<body>
+
+<div class="wrap">
+
+    <h1>🔍 接口连接自检</h1>
+
+    <div class="sub">
+        这个页面会把「Failed to fetch」这类模糊报错拆成可读结论。
+        把它部署到和 index.html 同一个目录，然后用同样的网址打开即可。
+    </div>
+
+
+    <div class="card">
+
+        <h2>① 运行环境</h2>
+
+        <div id="env"></div>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>② 接口探测</h2>
+
+        <button id="runBtn" onclick="runAll()">重新自检</button>
+
+        <button class="gray" onclick="testUpload(this)">测试上传 1MB（会在服务器落一个 _selftest.bin）</button>
+
+        <div id="results"></div>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>③ 结论</h2>
+
+        <div id="verdict" class="verdict note">正在自检…</div>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>④ 完整报告（可复制发给我）</h2>
+
+        <pre id="report">正在生成…</pre>
+
+        <button class="gray" onclick="copyReport()">复制报告</button>
+
+    </div>
+
+</div>
+
+
+<script>
+
+// =============================
+// 探测目标
+// =============================
+function buildTargets() {
+
+    const host = location.hostname;
+    const proto = location.protocol;
+
+    const list = [
+        { label: "同源 · 带 /api 前缀", url: "/api/files", kind: "same" },
+        { label: "同源 · 根路径",      url: "/files",     kind: "same" },
+        { label: "同源 · /api 聊天列表", url: "/api/chats", kind: "same" },
+        { label: "同源 · 根路径聊天列表", url: "/chats",   kind: "same" }
+    ];
+
+    // 常见后端端口（本地开发时后端常跑在这里）
+    [8000, 8080, 5000, 9000, 3000].forEach(function (p) {
+
+        list.push({
+            label: "后端端口 " + p,
+            url: proto + "//" + host + ":" + p + "/files",
+            kind: "port"
+        });
+
+    });
+
+    return list;
+}
+
+
+
+// =============================
+// 探测：CORS 模式（能拿到状态码）
+// =============================
+async function probeCors(url) {
+
+    try {
+
+        const res = await fetch(url, { method: "GET", cache: "no-store" });
+
+        let body = "";
+
+        try {
+
+            body = (await res.text()).replace(/<[^>]+>/g, " ")
+                .replace(/\s+/g, " ").trim().slice(0, 120);
+
+        } catch (e) { /* 忽略 */ }
+
+        return { ok: true, status: res.status, body: body };
+
+    } catch (e) {
+
+        return { ok: false, error: (e && e.name) + ": " + (e && e.message) };
+
+    }
+
+}
+
+
+
+// =============================
+// 探测：no-cors 模式（只判断"能不能连上主机"）
+// =============================
+async function probeReach(url) {
+
+    try {
+
+        await fetch(url, { method: "GET", mode: "no-cors", cache: "no-store" });
+
+        return true;   // 服务器有响应（哪怕是 404），说明连得上
+
+    } catch (e) {
+
+        return false;  // 连接被拒 / DNS 失败 / 被拦截
+
+    }
+
+}
+
+
+
+// =============================
+// 全局报告缓冲
+// =============================
+let reportLines = [];
+
+
+function log(line) {
+
+    reportLines.push(line);
+
+    const el = document.getElementById("report");
+
+    el.textContent = reportLines.join("\n");
+
+}
+
+
+
+// =============================
+// 主流程
+// =============================
+async function runAll() {
+
+    const runBtn = document.getElementById("runBtn");
+
+    runBtn.disabled = true;
+    runBtn.textContent = "自检中…";
+
+    reportLines = [];
+
+    document.getElementById("results").innerHTML = "";
+
+    // ---------- 环境 ----------
+    const env = {
+        pageUrl: location.href,
+        protocol: location.protocol,
+        origin: location.origin,
+        host: location.host,
+        isFile: location.protocol === "file:",
+        isSecure: String(window.isSecureContext)
+    };
+
+    log("===== 接口连接自检 =====");
+    log("时间: " + new Date().toLocaleString());
+    log("页面地址: " + env.pageUrl);
+    log("协议: " + env.protocol);
+    log("源(origin): " + env.origin);
+    log("安全上下文: " + env.isSecure);
+    log("UA: " + navigator.userAgent);
+    log("");
+
+    let envHtml = "";
+
+    envHtml += row("页面地址", env.pageUrl, "info");
+
+    envHtml += row("协议 / 安全上下文", env.protocol + " / " + env.isSecure,
+        env.isFile ? "bad" : "ok");
+
+    if (env.isFile) {
+
+        envHtml += '<div class="row"><span class="badge b-bad">致命</span>' +
+            '你是在用 <b>file://</b> 直接打开网页的。' +
+            '浏览器禁止 file:// 页面调用任何后端接口，' +
+            '所有请求都会是「Failed to fetch」。' +
+            '<br>请通过 http/https 地址访问网页。</div>';
+
+    }
+
+    document.getElementById("env").innerHTML = envHtml;
+
+
+    log("--- 环境结论 ---");
+    log(env.isFile
+        ? "!! 页面是 file:// 打开的，必须改成 http/https 访问"
+        : "页面通过 http(s) 正常打开");
+    log("");
+
+
+    // ---------- 接口探测 ----------
+    log("--- 接口探测 ---");
+
+    const targets = buildTargets();
+
+    let sameApiExists = false;
+    let sameRootExists = false;
+    let anyPortReachable = null;
+
+    let resultsHtml = "";
+
+    for (let i = 0; i < targets.length; i++) {
+
+        const t = targets[i];
+
+        let html = "";
+        let line = "";
+
+        if (env.isFile && t.kind === "same") {
+
+            html = '<div class="row"><span class="badge b-bad">跳过</span>' +
+                t.label + ' <span class="url">' + t.url + '</span>' +
+                '<div class="note">file:// 页面无法发起相对地址请求</div></div>';
+
+            line = "跳过 " + t.url + "（file:// 页面）";
+
+        } else {
+
+            const cors = await probeCors(t.url);
+
+            if (cors.ok) {
+
+                const is2xx = cors.status >= 200 && cors.status < 300;
+
+                const is404 = cors.status === 404;
+
+                const level = is2xx ? "ok" : (is404 ? "warn" : "bad");
+
+                html = '<div class="row">' +
+                    '<span class="badge b-' + level + '">HTTP ' + cors.status + '</span>' +
+                    t.label + ' <span class="url">' + t.url + '</span>' +
+                    (cors.body ? '<div class="note">响应: ' + escapeHtml(cors.body) + '</div>' : '') +
+                    '</div>';
+
+                line = "HTTP " + cors.status + "  " + t.url +
+                    (cors.body ? "  | " + cors.body : "");
+
+                if (t.kind === "same" && is2xx) {
+
+                    if (t.url.indexOf("/api/") === 0) sameApiExists = true;
+
+                    if (t.url.indexOf("/api/") !== 0) sameRootExists = true;
+
+                }
+
+            } else {
+
+                // CORS 模式失败，再用 no-cors 判断主机是否可达
+                const reachable = await probeReach(t.url);
+
+                const level = reachable ? "warn" : "bad";
+
+                html = '<div class="row">' +
+                    '<span class="badge b-' + level + '">' +
+                    (reachable ? "可达但被 CORS 拦截" : "连不上") + '</span>' +
+                    t.label + ' <span class="url">' + t.url + '</span>' +
+                    '<div class="note">' + escapeHtml(cors.error) + '</div>' +
+                    '</div>';
+
+                line = (reachable ? "可达但被CORS拦截" : "连不上") +
+                    "  " + t.url + "  | " + cors.error;
+
+                if (t.kind === "port" && reachable && anyPortReachable === null) {
+
+                    anyPortReachable = t.url.replace(/\/files$/, "");
+
+                }
+
+            }
+
+        }
+
+        resultsHtml += html;
+
+        log(line);
+
+    }
+
+    document.getElementById("results").innerHTML = resultsHtml;
+
+    // ---------- 结论 ----------
+    log("");
+
+    log("--- 结论 ---");
+
+    let verdict = "";
+
+    if (env.isFile) {
+
+        verdict =
+            '页面是通过 <b>file://</b> 打开的，这是「Failed to fetch」最直接的原因。' +
+            '<br>请把 frontend 目录挂到 Web 服务下用 http/https 访问。';
+
+    } else if (sameApiExists || sameRootExists) {
+
+        const which = sameApiExists ? "/api/ 前缀" : "根路径";
+
+        verdict =
+            '后端接口是可用的（走 ' + which + '）。<br>' +
+            '如果上传还失败，多半是<b>文件太大被服务器拦下</b>（nginx client_max_body_size）' +
+            '或<b>后端处理时报 500</b>。请点上面的「测试上传 1MB」按钮验证。';
+
+    } else if (anyPortReachable) {
+
+        verdict =
+            '当前网站的地址下<b>没有转发到后端</b>，但发现后端可能跑在：<br>' +
+            '<span class="url">' + anyPortReachable + '</span><br>' +
+            '可在 index.html 后面加参数临时指定：' +
+            '<span class="url">index.html?api=' + anyPortReachable + '</span>';
+
+    } else {
+
+        verdict =
+            '当前网站的地址下<b>找不到后端接口</b>，也没探测到常见端口上的后端。<br>' +
+            '请检查：① Python 后端服务是否真的启动（uvicorn 有没有报错退出）；' +
+            '② nginx 是否配置了把接口转发给后端；' +
+            '③ requirements.txt 里缺了 pymupdf / langchain 等依赖，' +
+            '这些缺失会让后端一启动就崩溃。';
+
+    }
+
+    document.getElementById("verdict").innerHTML = verdict;
+
+    log(verdict.replace(/<[^>]+>/g, ""));
+
+    runBtn.disabled = false;
+    runBtn.textContent = "重新自检";
+
+}
+
+
+
+// =============================
+// 测试上传（验证请求体大小限制）
+// =============================
+async function testUpload(btn) {
+
+    btn.disabled = true;
+    btn.textContent = "上传测试中…";
+
+    const blob = new Blob([new Uint8Array(1024 * 1024)], { type: "application/octet-stream" });
+
+    const form = new FormData();
+
+    form.append("file", blob, "_selftest.bin");
+
+    const url = "/upload";
+
+    let line = "";
+
+    try {
+
+        const res = await fetch(url, { method: "POST", body: form });
+
+        line = "测试上传 " + url + " → HTTP " + res.status;
+
+        if (res.status === 413) {
+
+            line += "  ← 文件被服务器大小限制拦下，需要调大 nginx client_max_body_size";
+
+        }
+
+    } catch (e) {
+
+        line = "测试上传 " + url + " → 网络错误 " + e.name + ": " + e.message;
+
+    }
+
+    log(line);
+
+    alert(line);
+
+    btn.disabled = false;
+    btn.textContent = "测试上传 1MB（会在服务器落一个 _selftest.bin）";
+
+}
+
+
+
+// =============================
+// 工具
+// =============================
+function row(label, value, level) {
+
+    const map = { ok: "b-ok", warn: "b-warn", bad: "b-bad", info: "b-info" };
+
+    return '<div class="row"><span class="badge ' + (map[level] || "b-info") + '">' +
+        escapeHtml(label) + '</span> <span class="url">' + escapeHtml(value) +
+        '</span></div>';
+
+}
+
+
+function escapeHtml(s) {
+
+    return String(s === null || s === undefined ? "" : s)
+
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+}
+
+
+function copyReport() {
+
+    const text = document.getElementById("report").textContent;
+
+    if (navigator.clipboard) {
+
+        navigator.clipboard.writeText(text).then(
+            function () { alert("报告已复制"); },
+            function () { alert("复制失败，请手动选中复制"); }
+        );
+
+    } else {
+
+        alert("请手动选中复制");
+
+    }
+
+}
+
+
+// 打开即自动自检
+runAll();
+
+</script>
+
+</body>
+
+</html>
