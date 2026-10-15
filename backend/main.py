@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 import hashlib
 import hmac
+import json
 import os
 import time
 import logging
@@ -19,6 +20,10 @@ import re
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
+IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 # ======================
@@ -34,7 +39,7 @@ from config import (
     APP_COOKIE_SECURE
 )
 
-from paper_agent import load_paper, ensure_db_loaded
+from paper_agent import load_paper, ensure_db_loaded, PAPER_SOURCE_PATH, get_paper_chunk_count
 
 from database import (
     init_db, create_chat, get_chats, delete_chat, save_message,
@@ -244,12 +249,18 @@ def chat(message: Message):
         if message.mode not in {"chat", "file", "paper"}:
             raise HTTPException(status_code=400, detail="未知的对话模式。")
         selected_filename = None
+        image_path = None
         if message.mode == "file":
             selected_filename = os.path.basename((message.filename or "").replace("\\", "/"))
             if not selected_filename or selected_filename != message.filename.replace("\\", "/"):
                 raise HTTPException(status_code=400, detail="请选择有效的上传文件。")
             if not os.path.isfile(os.path.join(UPLOAD_DIR, selected_filename)):
                 raise HTTPException(status_code=404, detail="指定资料不存在，请重新选择或上传。")
+            extension = os.path.splitext(selected_filename)[1].lower()
+            if extension in IMAGE_MIME_TYPES:
+                if os.path.getsize(os.path.join(UPLOAD_DIR, selected_filename)) > MAX_IMAGE_BYTES:
+                    raise HTTPException(status_code=413, detail="图片不能超过 10 MB，请压缩后重新上传。")
+                image_path = os.path.join(UPLOAD_DIR, selected_filename)
 
         history = [
             {"role": "assistant" if role == "ai" else "user", "content": content}
@@ -264,7 +275,7 @@ def chat(message: Message):
 
         result = run_agent(
             message.text, history=history, mode=message.mode,
-            filename=selected_filename, memory_context=memory_context,
+            filename=selected_filename, image_path=image_path, memory_context=memory_context,
         )
         update_chat_title(message.chat_id, message.text[:15])
         save_message(message.chat_id, "user", message.text)
@@ -349,26 +360,27 @@ async def upload_file(file: UploadFile = File(...)):
 
     filename = os.path.basename((file.filename or "upload.bin").replace("\\", "/"))
 
-    if os.path.splitext(filename)[1].lower() not in {".txt", ".pdf", ".docx"}:
-        raise HTTPException(status_code=415, detail="仅支持 TXT、PDF 和 DOCX 文件。")
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in {".txt", ".pdf", ".docx", *IMAGE_MIME_TYPES}:
+        raise HTTPException(status_code=415, detail="支持 TXT、PDF、DOCX、JPG、PNG 和 WEBP 文件。")
 
     content = await file.read(20 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="文件内容为空。")
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="文件不能超过 20 MB。")
+    if extension in IMAGE_MIME_TYPES and len(content) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="图片不能超过 10 MB。")
 
-    path = _unique_upload_path(filename)
-
-    with open(path, "wb") as f:
-
-        f.write(content)
+    path, duplicate = _store_uploaded_content(filename, content)
 
     return {
 
         "filename": os.path.basename(path),
 
-        "message": "上传成功"
+        "duplicate": duplicate,
+
+        "message": "检测到相同文件，已复用已有文件" if duplicate else "上传成功"
 
     }
 
@@ -391,21 +403,36 @@ async def upload_paper(file: UploadFile = File(...)):
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="论文不能超过 50 MB。")
 
-    path = _unique_upload_path(filename)
+    digest = hashlib.sha256(content).hexdigest()
 
-    with open(path, "wb") as f:
+    # If this exact PDF is already the active index, reuse both the uploaded
+    # file and its vectors instead of paying for embeddings again.
+    if ensure_db_loaded() and _active_paper_matches(digest):
+        with open(PAPER_SOURCE_PATH, "r", encoding="utf-8") as source_file:
+            indexed_name = os.path.basename(json.load(source_file).get("name", filename))
+        return {
+            "message": "检测到相同论文，已复用已上传文件和解析索引",
+            "filename": indexed_name,
+            "chunks": get_paper_chunk_count(),
+            "duplicate": True,
+            "reused_index": True,
+        }
 
-        f.write(content)
+    path, duplicate = _store_uploaded_content(filename, content)
 
     count = load_paper(path)
 
     return {
 
-        "message": "论文解析完成",
+        "message": "检测到相同文件，已复用文件并重新建立论文索引" if duplicate else "论文解析完成",
 
         "filename": os.path.basename(path),
 
-        "chunks": count
+        "chunks": count,
+
+        "duplicate": duplicate,
+
+        "reused_index": False
 
     }
 
@@ -435,7 +462,7 @@ def files():
 
         "files": sorted(
             name for name in os.listdir(UPLOAD_DIR)
-            if os.path.splitext(name)[1].lower() in {".txt", ".pdf", ".docx"}
+            if os.path.splitext(name)[1].lower() in {".txt", ".pdf", ".docx", *IMAGE_MIME_TYPES}
         )
 
     }
@@ -525,6 +552,50 @@ def _unique_upload_path(filename: str) -> str:
         candidate = os.path.join(UPLOAD_DIR, f"{stem} ({number}){ext}")
         number += 1
     return candidate
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as uploaded_file:
+        for block in iter(lambda: uploaded_file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _find_existing_upload(content: bytes, extension: str) -> str | None:
+    """Find byte-identical uploads while keeping existing filenames stable."""
+    expected_size = len(content)
+    expected_digest = hashlib.sha256(content).hexdigest()
+    for name in sorted(os.listdir(UPLOAD_DIR)):
+        path = os.path.join(UPLOAD_DIR, name)
+        if os.path.splitext(name)[1].lower() != extension.lower() or not os.path.isfile(path):
+            continue
+        try:
+            if os.path.getsize(path) == expected_size and _file_sha256(path) == expected_digest:
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _store_uploaded_content(filename: str, content: bytes) -> tuple[str, bool]:
+    existing = _find_existing_upload(content, os.path.splitext(filename)[1])
+    if existing:
+        return existing, True
+    path = _unique_upload_path(filename)
+    with open(path, "wb") as uploaded_file:
+        uploaded_file.write(content)
+    return path, False
+
+
+def _active_paper_matches(digest: str) -> bool:
+    try:
+        with open(PAPER_SOURCE_PATH, "r", encoding="utf-8") as source_file:
+            source_name = os.path.basename(json.load(source_file).get("name", ""))
+        source_path = os.path.join(UPLOAD_DIR, source_name)
+        return bool(source_name and os.path.isfile(source_path) and _file_sha256(source_path) == digest)
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _run_legacy_agent(question: str, chat_id: int | None, mode: str, filename: str | None = None):

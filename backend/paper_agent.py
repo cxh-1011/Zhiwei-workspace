@@ -168,6 +168,17 @@ def search_paper(question, k=4):
     return [{"source": source_name, "text": doc.page_content} for doc in docs]
 
 
+def get_paper_chunk_count():
+    """Return the number of chunks in the currently loaded paper index."""
+    global db
+    if not ensure_db_loaded() or db is None:
+        return 0
+    try:
+        return int(db.index.ntotal)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def ask_paper(question):
 
     """

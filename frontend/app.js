@@ -1044,6 +1044,7 @@ function renderAgentTrace(steps, status, rounds, durationMs) {
     const labels = {
         web_search: "联网搜索",
         paper_search: "检索论文",
+        scholarly_search: "学术论文检索",
         search_uploaded_files: "检索上传资料",
         list_uploaded_files: "查看资料列表"
     };
@@ -1123,7 +1124,7 @@ function clearChat() {
 
         if ($("currentTitle")) $("currentTitle").textContent = "新对话";
 
-        box.innerHTML = '<div id="welcome" class="welcome"><div class="welcome-orb"><i></i><i></i><i></i></div><div class="eyebrow">YOUR THINKING PARTNER</div><h1>你好，今天想用 AI 做什么？</h1><p>先选择一个功能，接下来的提问和回答都会在这里进行。</p><div class="mode-grid"><button class="mode-card" onclick="selectMode(\'chat\')"><span class="mode-icon blue">✳</span><span><b>智能对话</b><small>自由提问、灵感探索与音乐推荐</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'file\')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传 PDF、DOCX 或 TXT，基于资料提问</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'paper\')"><span class="mode-icon amber">论</span><span><b>论文助手</b><small>解析 PDF 论文，检索内容并深入讨论</small></span><span class="mode-arrow">↗</span></button></div></div>';
+        box.innerHTML = '<div id="welcome" class="welcome"><div class="welcome-orb"><i></i><i></i><i></i></div><div class="eyebrow">YOUR THINKING PARTNER</div><h1>你好，今天想用 AI 做什么？</h1><p>先选择一个功能，接下来的提问和回答都会在这里进行。</p><div class="mode-grid"><button class="mode-card" onclick="selectMode(\'chat\')"><span class="mode-icon blue">✳</span><span><b>智能对话</b><small>自由提问、灵感探索与音乐推荐</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'file\')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传文档或图片，提取文字并理解图像</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'paper\')"><span class="mode-icon amber">论</span><span><b>论文助手</b><small>解析 PDF 论文，检索内容并深入讨论</small></span><span class="mode-arrow">↗</span></button></div></div>';
         activeMode = null;
         if ($("modeBar")) $("modeBar").hidden = true;
         if ($("input")) { $("input").disabled = true; $("input").placeholder = "先选择一个功能…"; $("input").value = ""; }
@@ -1144,7 +1145,7 @@ let activeMode = null;
 
 const MODE_INFO = {
     chat: { name: "智能对话", icon: "✳", placeholder: "发送消息…", hint: "Enter 发送 · Shift + Enter 换行", greeting: "你好，我可以陪你一起探索问题、整理思路，也可以根据你的心情推荐音乐。" },
-    file: { name: "文件问答", icon: "▤", placeholder: "针对这份资料提问…", hint: "回答将根据所选资料生成", greeting: "请先添加或选择一份资料，然后告诉我你想了解什么。" },
+    file: { name: "文件问答", icon: "▤", placeholder: "针对这份资料或图片提问…", hint: "支持 PDF、DOCX、TXT、JPG、PNG、WEBP；图片最大 10 MB", greeting: "请先添加或选择一份资料或图片，然后告诉我你想了解什么。" },
     paper: { name: "论文助手", icon: "论", placeholder: "询问论文内容…", hint: "回答将基于已解析的论文内容", greeting: "请先选择并解析一篇 PDF 论文，再开始提问。" }
 };
 
@@ -1515,7 +1516,7 @@ async function uploadPaper() {
         paperReady = true;
         if (input) input.value = "";
         if ($("uploadPaperBtn")) $("uploadPaperBtn").hidden = true;
-        showModeStatus("论文解析完成 · " + fname + " · 共 " + chunks + " 个检索片段", "success");
+        showModeStatus(message + " · " + fname + " · 共 " + chunks + " 个检索片段", "success");
 
         showBanner("");
 

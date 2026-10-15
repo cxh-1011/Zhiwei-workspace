@@ -109,7 +109,7 @@ def _search(args: dict, context: dict) -> ToolResult:
 
 register(Tool(
     name="search_uploaded_files",
-    description="按问题检索用户上传的 TXT、PDF、DOCX 资料，返回最相关的文本片段和文件名。用户询问上传资料内容时使用；若聊天处于指定文件模式，则只搜索该文件。",
+    description="按问题检索用户上传的 TXT、PDF、DOCX 资料，返回最相关的文本片段和文件名。图片由文件问答模式直接交给视觉模型理解，不要用此工具检索图片。",
     parameters={
         "type": "object",
         "properties": {"query": {"type": "string", "description": "要从上传资料中查找的问题或关键词"}},
@@ -123,7 +123,7 @@ register(Tool(
 def _list(_args: dict, _context: dict) -> ToolResult:
     names = sorted(
         name for name in os.listdir(UPLOAD_DIR)
-        if os.path.splitext(name)[1].lower() in SUPPORTED
+        if os.path.splitext(name)[1].lower() in SUPPORTED | {".jpg", ".jpeg", ".png", ".webp"}
     ) if os.path.isdir(UPLOAD_DIR) else []
     return ToolResult(True, "\n".join(names) if names else "目前没有上传资料。", {"files": names})
 

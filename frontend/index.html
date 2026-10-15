@@ -34,7 +34,7 @@
         <p>先选择一个功能，接下来的提问和回答都会在这里进行。</p>
         <div class="mode-grid">
           <button class="mode-card" onclick="selectMode('chat')"><span class="mode-icon blue">✳</span><span><b>智能对话</b><small>自由提问、灵感探索与音乐推荐</small></span><span class="mode-arrow">↗</span></button>
-          <button class="mode-card" onclick="selectMode('file')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传 PDF、DOCX 或 TXT，基于资料提问</small></span><span class="mode-arrow">↗</span></button>
+          <button class="mode-card" onclick="selectMode('file')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传文档或图片，提取文字并理解图像</small></span><span class="mode-arrow">↗</span></button>
           <button class="mode-card" onclick="selectMode('paper')"><span class="mode-icon amber">论</span><span><b>论文助手</b><small>解析 PDF 论文，检索内容并深入讨论</small></span><span class="mode-arrow">↗</span></button>
         </div>
       </div>
@@ -54,7 +54,7 @@
           <button id="uploadPaperBtn" class="attach-button" onclick="uploadPaper()" hidden>解析论文</button>
         </div>
       </div>
-      <input type="file" id="fileInput" accept=".pdf,.docx,.txt" onchange="showSelectedFile('fileInput','fileSelectedName')">
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onchange="showSelectedFile('fileInput','fileSelectedName')">
       <input type="file" id="paperInput" accept=".pdf,application/pdf" onchange="showSelectedFile('paperInput','paperFileName')">
       <input type="hidden" id="fileName"><input type="hidden" id="fileQuestion"><input type="hidden" id="paperQuestion">
       <span id="fileSelectedName" hidden>未选择文件</span><span id="paperFileName" hidden>未选择论文</span>
