@@ -83,6 +83,21 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS learning_tasks(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        details TEXT DEFAULT '',
+        stage TEXT DEFAULT '',
+        status TEXT DEFAULT 'todo',
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_learning_tasks_plan ON learning_tasks(plan_id, sort_order, id)")
+
 
 
     cursor.execute("""
@@ -448,6 +463,16 @@ def list_learning_plans(limit=50):
     return rows
 
 
+def get_learning_plan(plan_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id,title,goal,content,status,created_at FROM learning_plans WHERE id=?",
+        (plan_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def set_learning_plan_status(plan_id, status):
     if status not in {"active", "done"}:
         return False
@@ -461,8 +486,89 @@ def set_learning_plan_status(plan_id, status):
 
 def delete_learning_plan(plan_id):
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.execute("DELETE FROM learning_plans WHERE id=?", (plan_id,))
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM learning_tasks WHERE plan_id=?", (plan_id,))
+    cursor.execute("DELETE FROM learning_plans WHERE id=?", (plan_id,))
     conn.commit()
     deleted = cursor.rowcount > 0
     conn.close()
     return deleted
+
+
+def add_learning_tasks(plan_id, tasks):
+    """Store a bounded ordered task list for one plan."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    created = []
+    for index, task in enumerate(tasks[:50]):
+        title = str(task.get("title", "")).strip()[:180]
+        if not title:
+            continue
+        details = str(task.get("details", "")).strip()[:1200]
+        stage = str(task.get("stage", "")).strip()[:80]
+        cursor.execute(
+            "INSERT INTO learning_tasks(plan_id,title,details,stage,sort_order) VALUES(?,?,?,?,?)",
+            (plan_id, title, details, stage, index),
+        )
+        created.append({"id": cursor.lastrowid, "title": title, "details": details, "stage": stage, "status": "todo"})
+    conn.commit()
+    conn.close()
+    return created
+
+
+def list_learning_tasks(plan_id):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id,title,details,stage,status,sort_order,created_at,completed_at FROM learning_tasks WHERE plan_id=? ORDER BY sort_order,id",
+        (plan_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def set_learning_task_status(plan_id, task_id, status):
+    if status not in {"todo", "done"}:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    completed_at = "CURRENT_TIMESTAMP" if status == "done" else "NULL"
+    cursor = conn.execute(
+        f"UPDATE learning_tasks SET status=?,completed_at={completed_at} WHERE id=? AND plan_id=?",
+        (status, task_id, plan_id),
+    )
+    conn.commit()
+    changed = cursor.rowcount > 0
+    conn.close()
+    return changed
+
+
+def delete_learning_task(plan_id, task_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute("DELETE FROM learning_tasks WHERE id=? AND plan_id=?", (task_id, plan_id))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def replace_unfinished_learning_tasks(plan_id, tasks):
+    """Keep completed work as a record and replace only unfinished work."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM learning_tasks WHERE plan_id=? AND status='todo'", (plan_id,))
+    offset_row = cursor.execute("SELECT COALESCE(MAX(sort_order), -1) FROM learning_tasks WHERE plan_id=?", (plan_id,)).fetchone()
+    offset = int(offset_row[0]) + 1
+    created = []
+    for index, task in enumerate(tasks[:50]):
+        title = str(task.get("title", "")).strip()[:180]
+        if not title:
+            continue
+        details = str(task.get("details", "")).strip()[:1200]
+        stage = str(task.get("stage", "")).strip()[:80]
+        cursor.execute(
+            "INSERT INTO learning_tasks(plan_id,title,details,stage,sort_order) VALUES(?,?,?,?,?)",
+            (plan_id, title, details, stage, offset + index),
+        )
+        created.append({"id": cursor.lastrowid, "title": title, "details": details, "stage": stage, "status": "todo"})
+    conn.commit()
+    conn.close()
+    return created

@@ -46,7 +46,8 @@ from database import (
     get_messages, update_chat_title, get_recent_messages, save_agent_run,
     get_agent_run, get_agent_runs_for_chat, add_memory, list_memories, delete_memory,
     save_learning_plan, list_learning_plans, set_learning_plan_status,
-    delete_learning_plan,
+    delete_learning_plan, get_learning_plan, add_learning_tasks, list_learning_tasks,
+    set_learning_task_status, delete_learning_task, replace_unfinished_learning_tasks,
 )
 
 
@@ -210,6 +211,20 @@ class MemoryRequest(BaseModel):
 
 class PlanRequest(BaseModel):
     goal: str
+
+
+class TaskRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=180)
+    details: str = Field("", max_length=1200)
+    stage: str = Field("", max_length=80)
+
+
+class TaskStatusRequest(BaseModel):
+    status: str
+
+
+class PlanAdjustmentRequest(BaseModel):
+    note: str = Field("", max_length=1000)
 
 
 @app.get("/auth/status")
@@ -654,10 +669,75 @@ def remove_memory(memory_id: int):
 
 @app.get("/learning_plans")
 def learning_plans():
-    return {"items": [
-        {"id": row[0], "title": row[1], "goal": row[2], "content": row[3], "status": row[4], "created_at": row[5]}
-        for row in list_learning_plans(50)
-    ]}
+    items = []
+    for row in list_learning_plans(50):
+        tasks = _serialize_plan_tasks(row[0])
+        completed = sum(task["status"] == "done" for task in tasks)
+        items.append({
+            "id": row[0], "title": row[1], "goal": row[2], "content": row[3],
+            "status": row[4], "created_at": row[5], "tasks": tasks,
+            "completed_tasks": completed, "total_tasks": len(tasks),
+        })
+    return {"items": items}
+
+
+def _serialize_plan_tasks(plan_id: int):
+    return [
+        {"id": row[0], "title": row[1], "details": row[2], "stage": row[3], "status": row[4],
+         "sort_order": row[5], "created_at": row[6], "completed_at": row[7]}
+        for row in list_learning_tasks(plan_id)
+    ]
+
+
+def _extract_task_payload(text: str):
+    """Read the model's JSON while keeping a useful fallback when it deviates."""
+    raw = (text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
+    candidates = [fenced.group(1).strip()] if fenced else []
+    candidates.append(raw)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        tasks = payload.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        normalized = []
+        for task in tasks[:21]:
+            if not isinstance(task, dict):
+                continue
+            title = str(task.get("title", "")).strip()
+            if title:
+                normalized.append({
+                    "title": title,
+                    "details": str(task.get("details", "")).strip(),
+                    "stage": str(task.get("stage", "")).strip(),
+                })
+        if normalized:
+            overview = str(payload.get("overview", "")).strip()[:4000]
+            title = str(payload.get("title", "")).strip()[:160]
+            return title, overview, normalized
+    return "", raw[:4000], []
+
+
+def _generate_plan_payload(goal: str, context: str, completed_tasks=None, note: str = ""):
+    completed_tasks = completed_tasks or []
+    progress = "\n".join(
+        f"- [{task['status']}] {task['stage']} {task['title']}" for task in completed_tasks
+    ) or "暂无任务进度。"
+    prompt = [
+        {"role": "system", "content": "你是一位适合研究生新手的学习规划助手。请按用户目标生成现实、循序渐进、可检查的待办。只返回 JSON，不要 Markdown 或代码块。JSON 格式：{\"title\":\"计划标题\",\"overview\":\"简短说明\",\"tasks\":[{\"stage\":\"第 1 天\",\"title\":\"具体动作\",\"details\":\"完成标准或操作说明\"}]}。任务数量为 5 到 12 条，每条都必须可勾选完成。不要假设用户已掌握高级知识。"},
+        {"role": "user", "content": f"学习目标：{goal}\n个人背景与记忆：\n{context or '暂未提供'}\n已有进度：\n{progress}\n调整说明：{note or '无'}"},
+    ]
+    response, _ = chat_completion(prompt, tools=None, timeout=35)
+    content = getattr(response, "content", None) or ""
+    title, overview, tasks = _extract_task_payload(content)
+    if not tasks:
+        tasks = [{"stage": "开始", "title": goal[:180], "details": "完成后在学习档案中勾选，并补充下一步学习目标。"}]
+    return title, overview or "已为你创建可勾选的学习待办。", tasks
 
 
 @app.post("/learning_plans/generate")
@@ -666,19 +746,55 @@ def generate_learning_plan(data: PlanRequest):
     if not goal:
         raise HTTPException(status_code=400, detail="请先写下学习目标。")
     context = "\n".join(f"[{row[2]}] {row[1]}" for row in list_memories(20))
-    prompt = [
-        {"role": "system", "content": "你是一位适合研究生新手的学习规划助手。请用中文制定现实、循序渐进、每项可检查的一周学习计划。不要假设用户已经掌握高级知识。输出 Markdown，按天列出目标、任务和完成标准。"},
-        {"role": "user", "content": f"学习目标：{goal}\n个人背景与记忆：\n{context or '暂未提供'}"},
-    ]
     try:
-        response, _ = chat_completion(prompt, tools=None, timeout=35)
-        content = getattr(response, "content", None) or "暂时无法生成计划，请调整目标后重试。"
+        generated_title, content, tasks = _generate_plan_payload(goal, context)
     except Exception as exc:
         logger.exception("生成学习计划失败")
         raise HTTPException(status_code=502, detail="学习计划暂时无法生成，请稍后重试。") from exc
-    title = "一周学习计划：" + goal[:60]
+    title = generated_title or "一周学习计划：" + goal[:60]
     plan_id = save_learning_plan(title, goal, content)
-    return {"id": plan_id, "title": title, "goal": goal, "content": content, "status": "active"}
+    created_tasks = add_learning_tasks(plan_id, tasks)
+    return {"id": plan_id, "title": title, "goal": goal, "content": content, "status": "active", "tasks": created_tasks}
+
+
+@app.post("/learning_plans/{plan_id}/tasks")
+def create_learning_task(plan_id: int, data: TaskRequest):
+    if not get_learning_plan(plan_id):
+        raise HTTPException(status_code=404, detail="学习计划不存在。")
+    tasks = add_learning_tasks(plan_id, [{"title": data.title, "details": data.details, "stage": data.stage}])
+    if not tasks:
+        raise HTTPException(status_code=400, detail="任务标题不能为空。")
+    return tasks[0]
+
+
+@app.patch("/learning_plans/{plan_id}/tasks/{task_id}")
+def update_learning_task(plan_id: int, task_id: int, data: TaskStatusRequest):
+    if not set_learning_task_status(plan_id, task_id, data.status):
+        raise HTTPException(status_code=404, detail="任务不存在或状态不正确。")
+    return {"message": "任务状态已更新。"}
+
+
+@app.delete("/learning_plans/{plan_id}/tasks/{task_id}")
+def remove_learning_task(plan_id: int, task_id: int):
+    if not delete_learning_task(plan_id, task_id):
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    return {"message": "任务已删除。"}
+
+
+@app.post("/learning_plans/{plan_id}/adjust")
+def adjust_learning_plan(plan_id: int, data: PlanAdjustmentRequest):
+    plan = get_learning_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="学习计划不存在。")
+    task_items = _serialize_plan_tasks(plan_id)
+    context = "\n".join(f"[{row[2]}] {row[1]}" for row in list_memories(20))
+    try:
+        _, overview, tasks = _generate_plan_payload(plan[2], context, task_items, data.note.strip())
+    except Exception as exc:
+        logger.exception("调整学习计划失败")
+        raise HTTPException(status_code=502, detail="暂时无法调整计划，请稍后重试。") from exc
+    created = replace_unfinished_learning_tasks(plan_id, tasks)
+    return {"message": "已保留完成任务，并替换未完成任务。", "overview": overview, "tasks": created}
 
 
 @app.patch("/learning_plans/{plan_id}")

@@ -2009,13 +2009,114 @@ async function loadLearningPlans() {
             const card = document.createElement("details");
             card.className = "hub-item plan-item";
             const summary = document.createElement("summary");
-            summary.textContent = (plan.status === "done" ? "✓ " : "◷ ") + plan.title;
+            const completed = Number(plan.completed_tasks || 0);
+            const total = Number(plan.total_tasks || 0);
+            summary.textContent = (plan.status === "done" ? "✓ " : "◷ ") + plan.title + (total ? ` · ${completed}/${total}` : "");
             const goal = document.createElement("p");
             goal.className = "learning-help";
             goal.textContent = "目标：" + plan.goal;
+            const progress = document.createElement("div");
+            progress.className = "plan-progress";
+            const progressFill = document.createElement("span");
+            progressFill.style.width = total ? `${Math.round(completed / total * 100)}%` : "0%";
+            progress.appendChild(progressFill);
             const content = document.createElement("div");
             content.className = "plan-content";
             content.textContent = plan.content;
+            const tasks = document.createElement("div");
+            tasks.className = "task-list";
+            (plan.tasks || []).forEach(task => {
+                const item = document.createElement("div");
+                item.className = "task-item" + (task.status === "done" ? " done" : "");
+                const check = document.createElement("input");
+                check.type = "checkbox";
+                check.checked = task.status === "done";
+                check.setAttribute("aria-label", "标记任务完成");
+                check.onchange = async () => {
+                    check.disabled = true;
+                    try {
+                        await apiJson(`/learning_plans/${plan.id}/tasks/${task.id}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ status: check.checked ? "done" : "todo" })
+                        });
+                        loadLearningPlans();
+                    } catch (error) {
+                        check.checked = !check.checked;
+                        alert("更新任务失败：" + error.message);
+                    } finally { check.disabled = false; }
+                };
+                const body = document.createElement("div");
+                const title = document.createElement("strong");
+                title.textContent = task.title;
+                const meta = document.createElement("small");
+                meta.textContent = [task.stage, task.details].filter(Boolean).join(" · ");
+                body.append(title);
+                if (meta.textContent) body.appendChild(meta);
+                const removeTask = document.createElement("button");
+                removeTask.className = "task-remove";
+                removeTask.textContent = "×";
+                removeTask.title = "删除任务";
+                removeTask.onclick = async () => {
+                    try {
+                        await apiJson(`/learning_plans/${plan.id}/tasks/${task.id}`, { method: "DELETE" });
+                        loadLearningPlans();
+                    } catch (error) { alert("删除任务失败：" + error.message); }
+                };
+                item.append(check, body, removeTask);
+                tasks.appendChild(item);
+            });
+            if (!plan.tasks?.length) {
+                tasks.innerHTML = '<div class="empty-hint">这是旧版计划，没有可勾选任务。点击“重新规划”即可生成待办。</div>';
+            }
+            const taskForm = document.createElement("form");
+            taskForm.className = "task-form";
+            const taskTitle = document.createElement("input");
+            taskTitle.placeholder = "添加一项任务，例如：阅读注意力机制章节";
+            taskTitle.maxLength = 180;
+            const taskStage = document.createElement("input");
+            taskStage.placeholder = "阶段，例如：第 2 天";
+            taskStage.maxLength = 80;
+            const addTask = document.createElement("button");
+            addTask.type = "submit";
+            addTask.textContent = "添加任务";
+            taskForm.append(taskTitle, taskStage, addTask);
+            taskForm.onsubmit = async event => {
+                event.preventDefault();
+                const titleValue = taskTitle.value.trim();
+                if (!titleValue) return;
+                addTask.disabled = true;
+                try {
+                    await apiJson(`/learning_plans/${plan.id}/tasks`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ title: titleValue, stage: taskStage.value.trim() })
+                    });
+                    loadLearningPlans();
+                } catch (error) { alert("添加任务失败：" + error.message); }
+                finally { addTask.disabled = false; }
+            };
+            const adjustBox = document.createElement("div");
+            adjustBox.className = "plan-adjust";
+            const adjustNote = document.createElement("input");
+            adjustNote.placeholder = "例如：这周只剩两天，帮我压缩计划";
+            adjustNote.maxLength = 1000;
+            const adjustButton = document.createElement("button");
+            adjustButton.textContent = "重新规划";
+            adjustButton.onclick = async () => {
+                adjustButton.disabled = true;
+                adjustButton.textContent = "正在调整…";
+                try {
+                    await apiJson(`/learning_plans/${plan.id}/adjust`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ note: adjustNote.value.trim() })
+                    });
+                    loadLearningPlans();
+                } catch (error) { alert("调整计划失败：" + error.message); }
+                finally { adjustButton.disabled = false; adjustButton.textContent = "重新规划"; }
+            };
+            adjustBox.append(adjustNote, adjustButton);
             const actions = document.createElement("div");
             actions.className = "hub-item-actions";
             const toggle = document.createElement("button");
@@ -2037,7 +2138,7 @@ async function loadLearningPlans() {
                 } catch (error) { alert("删除计划失败：" + error.message); }
             };
             actions.append(toggle, remove);
-            card.append(summary, goal, content, actions);
+            card.append(summary, goal, progress, content, tasks, taskForm, adjustBox, actions);
             box.appendChild(card);
         });
     } catch (error) {
@@ -2064,7 +2165,7 @@ async function generateLearningPlan(event) {
         alert("生成计划失败：" + error.message);
     } finally {
         button.disabled = false;
-        button.textContent = "生成并保存计划";
+        button.textContent = "生成任务计划";
     }
 }
 

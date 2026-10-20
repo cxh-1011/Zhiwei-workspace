@@ -75,8 +75,8 @@
         <form id="memoryForm" onsubmit="saveLearningMemory(event)"><input id="memoryCategory" maxlength="40" placeholder="分类，例如：研究方向" value="偏好"><textarea id="memoryContent" maxlength="1200" required placeholder="例如：我刚读研一，正在学习机器学习基础。"></textarea><button class="hub-primary" type="submit">保存记忆</button></form>
         <div id="memoryList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
       </section>
-      <section class="learning-section"><h3>一周学习计划</h3><p class="learning-help">写下目标，千问会结合已保存的背景生成可执行计划。</p>
-        <form id="planForm" onsubmit="generateLearningPlan(event)"><textarea id="planGoal" maxlength="1000" required placeholder="例如：一周内理解 Transformer 的基本结构和注意力机制"></textarea><button class="hub-primary" id="generatePlanBtn" type="submit">生成并保存计划</button></form>
+      <section class="learning-section"><h3>任务规划</h3><p class="learning-help">写下目标，千问会生成可勾选待办；完成后可按进度重新规划。</p>
+        <form id="planForm" onsubmit="generateLearningPlan(event)"><textarea id="planGoal" maxlength="1000" required placeholder="例如：一周内理解 Transformer 的基本结构和注意力机制"></textarea><button class="hub-primary" id="generatePlanBtn" type="submit">生成任务计划</button></form>
         <div id="planList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
       </section>
     </div>
