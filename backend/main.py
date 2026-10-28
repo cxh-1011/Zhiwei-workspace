@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 import hashlib
 import hmac
@@ -192,6 +192,9 @@ class Message(BaseModel):
     chat_id: int = Field(..., gt=0)
     mode: str = "chat"
     filename: str | None = None
+    # 是否允许助手写入学习档案（长期记忆 / 勾选任务）。默认关闭。
+    # 用 StrictBool：只接受真正的 true/false，避免 "yes"、1 之类的值被宽松转成真。
+    allow_writes: StrictBool = False
 
 
 class PaperQuestion(BaseModel):
@@ -291,6 +294,7 @@ def chat(message: Message):
         result = run_agent(
             message.text, history=history, mode=message.mode,
             filename=selected_filename, image_path=image_path, memory_context=memory_context,
+            allow_writes=message.allow_writes,
         )
         update_chat_title(message.chat_id, message.text[:15])
         save_message(message.chat_id, "user", message.text)
@@ -646,7 +650,8 @@ def agent_runs(chat_id: int):
 @app.get("/memories")
 def memories():
     return {"items": [
-        {"id": row[0], "content": row[1], "category": row[2], "created_at": row[3]}
+        {"id": row[0], "content": row[1], "category": row[2], "created_at": row[3],
+         "source": row[4] if len(row) > 4 else "user"}
         for row in list_memories(100)
     ]}
 

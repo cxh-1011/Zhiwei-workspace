@@ -116,9 +116,21 @@ def init_db():
 
 
 
+    # ---- 兼容旧库的增量迁移 ----
+    # memories 新增 source 列：区分「用户手动添加」和「助手写入」，
+    # 让用户能审计、能只删助手加的那些。旧库没有这列，这里补上。
+    _ensure_column(cursor, "memories", "source", "TEXT DEFAULT 'user'")
+
     conn.commit()
 
     conn.close()
+
+
+def _ensure_column(cursor, table, column, ddl):
+    """给已存在的表补列；CREATE TABLE IF NOT EXISTS 不会改动旧表结构。"""
+    existing = {row[1] for row in cursor.execute("PRAGMA table_info(%s)" % table).fetchall()}
+    if column not in existing:
+        cursor.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, ddl))
 
 
 
@@ -418,10 +430,14 @@ def get_agent_runs_for_chat(chat_id, limit=100):
     return results
 
 
-def add_memory(content, category="偏好"):
+def add_memory(content, category="偏好", source="user"):
+    """source: 'user' 用户手动添加；'agent' 助手按用户要求写入。"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO memories(content,category) VALUES(?,?)", (content[:1200], category[:40]))
+    cursor.execute(
+        "INSERT INTO memories(content,category,source) VALUES(?,?,?)",
+        (content[:1200], category[:40], source[:16]),
+    )
     memory_id = cursor.lastrowid
     cursor.execute("DELETE FROM memories WHERE id NOT IN (SELECT id FROM memories ORDER BY id DESC LIMIT 100)")
     conn.commit()
@@ -430,8 +446,12 @@ def add_memory(content, category="偏好"):
 
 
 def list_memories(limit=100):
+    # 前四个字段的下标保持不变，source 追加在末尾，避免影响已有调用方
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT id,content,category,created_at FROM memories ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
+    rows = conn.execute(
+        "SELECT id,content,category,created_at,COALESCE(source,'user') FROM memories ORDER BY id DESC LIMIT ?",
+        (max(1, min(limit, 200)),),
+    ).fetchall()
     conn.close()
     return rows
 

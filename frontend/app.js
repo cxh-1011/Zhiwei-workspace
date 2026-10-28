@@ -9,6 +9,8 @@ let currentChatId = null;
 let chatCreation = null;
 let knownFiles = new Set();
 let paperReady = false;
+// 是否允许助手写入学习档案（长期记忆 / 勾选任务）。默认关闭。
+let allowWrites = false;
 
 // 首次加载聊天列表时，是否已经自动打开过最近一个会话
 let initialLoadDone = false;
@@ -890,7 +892,8 @@ async function sendMessage() {
                 text: text,
                 chat_id: chatId,
                 mode: activeMode || "chat",
-                filename: activeMode === "file" ? selectedFilename : null
+                filename: activeMode === "file" ? selectedFilename : null,
+                allow_writes: allowWrites
             })
         });
 
@@ -931,6 +934,12 @@ async function sendMessage() {
         }
 
         chat.scrollTop = chat.scrollHeight;
+
+        // 开启写入时，助手可能改了档案内容——静默同步，下次打开学习档案就是最新的
+        if (allowWrites) {
+            loadMemories();
+            loadLearningPlans();
+        }
 
     } catch (err) {
 
@@ -1857,6 +1866,7 @@ document.addEventListener(
 
 
         // 认证通过后才加载任何聊天、文件或论文信息。
+        restoreAllowWrites();
         checkAuthentication();
 
     }
@@ -1928,6 +1938,28 @@ async function logout() {
     showLoginGate();
 }
 
+// =============================
+// 学习档案的写入开关
+// =============================
+// 默认关闭：助手不能写入长期记忆，也不能勾选任务。
+// 打开后，后端才会注册 remember / set_task_status 三个写入工具，
+// 而且仍要求「用户明确要求」才调用。状态存在本地，刷新后保持。
+
+function onAllowWritesChange() {
+    const box = $("allowWrites");
+    allowWrites = Boolean(box && box.checked);
+    box?.closest(".write-toggle")?.classList.toggle("on", allowWrites);
+    try { localStorage.setItem("allowWrites", allowWrites ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+}
+
+function restoreAllowWrites() {
+    const box = $("allowWrites");
+    if (!box) return;
+    try { box.checked = localStorage.getItem("allowWrites") === "1"; } catch (_) { box.checked = false; }
+    allowWrites = Boolean(box.checked);
+    box.closest(".write-toggle")?.classList.toggle("on", allowWrites);
+}
+
 async function openLearningHub() {
     const dialog = $("learningHub");
     if (!dialog) return;
@@ -1957,6 +1989,14 @@ async function loadMemories() {
             const category = document.createElement("span");
             category.className = "hub-category";
             category.textContent = item.category || "记忆";
+            // 助手写入的记忆单独标出来，方便你审计和删除
+            if (item.source === "agent") {
+                const badge = document.createElement("span");
+                badge.className = "hub-source";
+                badge.textContent = "助手写入";
+                badge.title = "这是助手根据你的要求写入的，可随时删除";
+                category.after(badge);
+            }
             const content = document.createElement("p");
             content.textContent = item.content;
             const remove = document.createElement("button");

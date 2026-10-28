@@ -13,7 +13,8 @@
 - **论文助手**：上传 PDF 后提取全文、切分文本、调用 DashScope Embedding 建立 FAISS 索引；针对当前论文提问时检索相关原文片段，再由模型组织回答。当前只保留一篇活动论文索引。
 - **重复文件识别**：根据 SHA-256 检查内容完全相同的文件，尽量复用已有文件；如果重复上传的 PDF 已对应当前索引，则复用现有索引。
 - **Agent 过程记录**：记录模型轮次、工具名称、工具参数、执行结果摘要、状态和耗时；聊天记录重新打开后可查看执行过程。
-- **任务规划与待办**：根据学习目标生成 5 到 12 条可勾选任务，显示完成进度；可手动补充任务，并根据已完成进度重新规划未完成任务。对话不会自动写入长期记忆。
+- **任务规划与待办**：根据学习目标生成 5 到 12 条可勾选任务，显示完成进度；可手动补充任务，并根据已完成进度重新规划未完成任务。
+- **学习档案（长期记忆与待办）**：用户可以手动添加长期记忆、勾选学习任务。**默认情况下助手不会写入档案**；只有勾选输入框旁的「允许助手记录」后，助手才能在用户明确要求时调用 `remember`、`list_learning_tasks`、`set_task_status` 三个工具，且写入的记忆会标记来源为「助手写入」，可随时删除。
 - **登录保护**：通过访问密码登录；使用 PBKDF2 校验密码，并通过签名的 HTTP-only Cookie 保存会话。
 - **自适应界面**：极简风格的响应式网页，可在桌面和手机上使用；支持对话历史、Markdown 回复和接口诊断页面。
 
@@ -31,7 +32,7 @@ flowchart TD
     DB --> U
 ```
 
-Agent 工具只提供搜索和资料检索，没有任意 Python 执行、Shell 命令执行或任意文件写入能力。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。
+Agent 工具只提供搜索、资料检索和学习档案写入，没有任意 Python 执行、Shell 命令执行或任意文件写入能力。档案写入工具默认不注册，需用户显式开启「允许助手记录」。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。
 
 ## 技术栈
 
@@ -60,7 +61,8 @@ Agent 工具只提供搜索和资料检索，没有任意 Python 执行、Shell 
 │   │   ├── web_search.py       # Tavily 网页搜索
 │   │   ├── academic_search.py  # Semantic Scholar 与 Crossref
 │   │   ├── file_search.py      # 上传文件文本检索
-│   │   └── paper_search.py     # 当前论文向量索引检索
+│   │   ├── paper_search.py     # 当前论文向量索引检索
+│   │   └── archive.py          # 学习档案写入（默认不启用）
 │   ├── requirements.txt
 │   ├── uploads/                # 运行时上传文件，不纳入 Git
 │   └── paper_index/            # 运行时论文索引，不纳入 Git
@@ -171,7 +173,7 @@ location / {
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET /auth/status`、`POST /auth/login`、`POST /auth/logout` | 登录状态与会话 |
-| `POST /chat` | 统一聊天入口，支持 `chat`、`file`、`paper` 三种模式 |
+| `POST /chat` | 统一聊天入口，支持 `chat`、`file`、`paper` 三种模式；`allow_writes: true` 时才允许助手写入学习档案 |
 | `POST /create_chat`、`GET /chats`、`GET /messages/{chat_id}`、`DELETE /delete_chat/{id}` | 聊天会话与消息历史 |
 | `POST /upload`、`GET /files` | 上传及列出问答资料 |
 | `POST /upload_paper`、`GET /paper_status` | 上传并解析论文、查询索引状态 |
