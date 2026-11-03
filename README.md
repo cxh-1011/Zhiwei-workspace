@@ -19,6 +19,7 @@
 - **任务规划与待办**：根据学习目标生成 5 到 12 条可勾选任务，显示完成进度；可手动补充任务，并根据已完成进度重新规划未完成任务。
 - **学习档案（长期记忆与待办）**：用户可以手动添加长期记忆、勾选学习任务。**默认情况下助手不会写入档案**；只有勾选输入框旁的「允许助手记录」后，助手才能在用户明确要求时调用 `remember`、`list_learning_tasks`、`set_task_status` 三个工具，且写入的记忆会标记来源为「助手写入」，可随时删除。
 - **工作区只读工具**：勾选「允许读代码」后，助手可以调用 `repo_map`、`list_dir`、`read_file`、`grep_code`、`git_status`、`git_diff`、`git_log` 来回答关于代码的问题。`repo_map` 一次给出「目录结构 + 每个源码文件的行数与顶层符号」，让它先看地图再精读，而不是整仓扫读；git 三个工具用来确认当前有没有未提交改动、刚才那步改了什么。这七个工具**全部只读**，不能修改文件、不能执行命令；访问范围限制在 `AGENT_WORKSPACE` 内，配置（`.env`）、数据库、密钥、依赖目录、上传数据一律不可读。默认关闭。
+- **代码修改与撤销**：再勾上「允许改代码」后，助手可以调用 `write_file`（新建或整体重写）与 `edit_file`（按锚点局部替换，要求锚点在文件中唯一）。每处改动都先备份到 `backups/agent-edits/<run_id>/`，回答上方实时出现红绿 diff，过程面板里留按钮「撤销这次改动」——按运行记录逆序还原，新建的文件会被删除，运行之后又被改过的文件会跳过，不会覆盖你后来的编辑。单次运行最多改 20 个文件、单文件 200 KB，越界路径与 `.env`、数据库、依赖目录、备份目录一律拒绝。默认关闭。
 - **登录保护**：通过访问密码登录；使用 PBKDF2 校验密码，并通过签名的 HTTP-only Cookie 保存会话。
 - **自适应界面**：极简风格的响应式网页，可在桌面和手机上使用；支持对话历史、Markdown 回复和接口诊断页面。
 
@@ -36,7 +37,7 @@ flowchart TD
     DB --> U
 ```
 
-Agent 工具只提供搜索、资料检索、学习档案写入和工作区只读访问，没有任意 Python 执行、Shell 命令执行或任意文件写入能力。档案写入工具默认不注册，需用户显式开启「允许助手记录」；工作区读取工具同样默认不注册，需开启「允许读代码」。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。
+Agent 工具提供搜索、资料检索、学习档案写入、工作区读取与工作区改动，仍然**没有任意 Python 执行、Shell 命令执行**能力。档案写入工具默认不注册，需用户显式开启「允许助手记录」；工作区读取工具需开启「允许读代码」；工作区写入工具需开启「允许改代码」，且每次落盘前都会备份、可整轮撤销。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。
 
 ## 技术栈
 
@@ -70,12 +71,14 @@ Agent 工具只提供搜索、资料检索、学习档案写入和工作区只�
 │   │   ├── archive.py          # 学习档案写入（默认不启用）
 │   │   ├── _guard.py           # 路径沙箱：读写执行三类工具共用的唯一边界
 │   │   ├── workspace.py        # 工作区只读访问：目录、文件、代码检索（默认不启用）
-│   │   └── repo.py             # 仓库感知：仓库地图 + git 状态/差异/历史（默认不启用）
+│   │   ├── repo.py             # 仓库感知：仓库地图 + git 状态/差异/历史（默认不启用）
+│   │   └── edits.py            # 工作区写入：锚点修改、落盘前备份、diff 与回滚（默认不启用）
 │   ├── requirements.txt
 │   ├── test_streaming.py       # 流式事件、工具调用、取消的离线测试（假模型）
 │   ├── test_stream_sse.py      # SSE 接口、鉴权与落库的集成测试（临时库）
 │   ├── test_thinking.py        # 思考过程、轮次事件与参数降级的离线测试
 │   ├── test_repo_tools.py      # 路径沙箱、仓库地图、git 三件套的离线测试
+│   ├── test_edit_tools.py      # 写入工具的沙箱、锚点、备份、预算与撤销测试
 │   ├── test_providers.py       # 服务商切换、Key 掩码、视觉降级的离线测试
 │   ├── test_model_api.py       # 模型配置接口的鉴权与 CRUD 测试
 │   ├── uploads/                # 运行时上传文件，不纳入 Git
@@ -150,7 +153,7 @@ cp ../.env.example .env
 | `AGENT_VISION_MODEL` | 可选 | 同上，默认 `qwen3-vl-plus`，用于图片问答 |
 | `DASHSCOPE_BASE_URL` | 可选 | 用 `.env` 播种默认服务商时的接口地址 |
 | `AGENT_MAX_ROUNDS` | 可选 | Agent 最多调用模型的轮数，默认 5，代码硬上限 8 |
-| `AGENT_WORKSPACE` | 可选 | 工作区只读工具的根目录，留空则用项目根目录；该目录外与配置/数据/密钥目录一律不可读 |
+| `AGENT_WORKSPACE` | 可选 | 工作区读写工具的根目录，留空则用项目根目录；该目录外与配置/数据/密钥目录一律不可访问。写入备份落在其下的 `backups/agent-edits/` |
 | `AGENT_MAX_TOOL_CALLS_PER_ROUND` | 可选 | 每轮最多执行的工具数，默认 3，代码硬上限 5 |
 | `AGENT_TOTAL_TIMEOUT` | 可选 | 单次 Agent 总耗时秒数，默认 60，代码硬上限 180 |
 | `AGENT_MAX_CONTEXT_CHARS` | 可选 | Agent 上下文字符预算，默认 24000 |
@@ -192,9 +195,10 @@ location / {
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET /auth/status`、`POST /auth/login`、`POST /auth/logout` | 登录状态与会话 |
-| `POST /chat` | 统一聊天入口，支持 `chat`、`file`、`paper` 三种模式；`allow_writes: true` 时才允许助手写入学习档案，`allow_workspace: true` 时才允许只读访问工作区代码，`show_thinking: true` 时请求模型返回思考过程 |
-| `POST /chat/stream` | 同一入口的流式版本，返回 `text/event-stream`，逐条推送 `start` / `round` / `reasoning` / `token` / `tool_start` / `tool_end` / `limit` / `error` / `done` 事件。`round` 标出第几轮，`reasoning` 是思考片段（与正文分开，不会混进回答），`tool_end` 带耗时与结果摘要 |
+| `POST /chat` | 统一聊天入口，支持 `chat`、`file`、`paper` 三种模式；`allow_writes: true` 时才允许助手写入学习档案，`allow_workspace: true` 时允许只读访问工作区代码，`allow_code_edit: true` 时允许修改工作区文件（自动带上只读工具），`show_thinking: true` 时请求模型返回思考过程 |
+| `POST /chat/stream` | 同一入口的流式版本，返回 `text/event-stream`，逐条推送 `start` / `round` / `reasoning` / `token` / `tool_start` / `file_edit` / `tool_end` / `limit` / `error` / `done` 事件。`round` 标出第几轮，`reasoning` 是思考片段（与正文分开，不会混进回答），`file_edit` 带文件路径、增删行数与 unified diff，`tool_end` 带耗时与结果摘要 |
 | `POST /chat/cancel/{run_id}` | 请求中断指定的流式运行；Agent 在下一轮或下一次工具调用前退出，状态记为 `cancelled` |
+| `POST /code/undo/{run_id}` | 撤销某次运行里的全部文件改动：按备份逆序还原，新建的文件删除；运行后又被改过的文件会跳过并返回原因 |
 | `POST /create_chat`、`GET /chats`、`GET /messages/{chat_id}`、`DELETE /delete_chat/{id}` | 聊天会话与消息历史 |
 | `POST /upload`、`GET /files` | 上传及列出问答资料 |
 | `POST /upload_paper`、`GET /paper_status` | 上传并解析论文、查询索引状态 |
