@@ -4,7 +4,9 @@ import os
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
-BACKEND = r"D:\hy\ai\ai_robot\backend"
+# 路径按本文件定位，不在仓库原地也能跑；写死绝对路径会让它在别的目录里
+# 悄悄加载另一份 agent.py，测的就不是当前这份代码。
+BACKEND = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BACKEND)
 os.chdir(BACKEND)
 
