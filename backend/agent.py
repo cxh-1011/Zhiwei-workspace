@@ -120,6 +120,7 @@ def run_agent(
     memory_context: str = "",
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
+    allow_workspace: bool = False,
 ) -> dict:
     run_id = uuid.uuid4().hex
     started = time.monotonic()
@@ -141,6 +142,14 @@ def run_agent(
             if name not in tool_names
         ]
 
+    # 工作区只读工具同样默认不注册：只有用户开启「允许读项目文件」才可见。
+    # 这三个工具只读，不能改文件、不能执行命令。
+    if allow_workspace:
+        tool_names = list(tool_names) + [
+            name for name in ("list_dir", "read_file", "grep_code")
+            if name not in tool_names
+        ]
+
     context = {"mode": mode, "filename": filename}
     prompt = SYSTEM_PROMPT
     if mode == "file":
@@ -159,6 +168,14 @@ def run_agent(
             "② 不要因为你自己觉得有用就自动归档；"
             "③ 勾选任务前先调用 list_learning_tasks 取得编号，不要猜；"
             "④ 写入后用一句话说明写了什么，方便用户核对。"
+        )
+    if allow_workspace:
+        prompt += (
+            "\n\n用户已开启「允许读项目文件」。你有 list_dir、read_file、grep_code 三个只读工具，只能看，不能改也不能执行命令。"
+            "使用方式：① 先 list_dir 看结构，或 grep_code 定位符号，再 read_file 读具体文件，不要一上来就整仓扫读；"
+            "② 单个文件较长时分页读，先读到关键部分即可；"
+            "③ 引用代码时必须写清「文件路径:行号」，没读到的内容不要编造；"
+            "④ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
         )
     messages = [{"role": "system", "content": prompt}]
     messages.extend(history or [])

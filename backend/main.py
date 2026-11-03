@@ -195,6 +195,8 @@ class Message(BaseModel):
     # 是否允许助手写入学习档案（长期记忆 / 勾选任务）。默认关闭。
     # 用 StrictBool：只接受真正的 true/false，避免 "yes"、1 之类的值被宽松转成真。
     allow_writes: StrictBool = False
+    # 是否允许助手只读访问工作区代码（list_dir / read_file / grep_code）。默认关闭。
+    allow_workspace: StrictBool = False
 
 
 class PaperQuestion(BaseModel):
@@ -295,6 +297,7 @@ def chat(message: Message):
             message.text, history=history, mode=message.mode,
             filename=selected_filename, image_path=image_path, memory_context=memory_context,
             allow_writes=message.allow_writes,
+            allow_workspace=message.allow_workspace,
         )
         update_chat_title(message.chat_id, message.text[:15])
         save_message(message.chat_id, "user", message.text)

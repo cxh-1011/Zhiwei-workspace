@@ -11,6 +11,8 @@ let knownFiles = new Set();
 let paperReady = false;
 // 是否允许助手写入学习档案（长期记忆 / 勾选任务）。默认关闭。
 let allowWrites = false;
+// 是否允许助手只读访问工作区代码。默认关闭。
+let allowWorkspace = false;
 
 // 首次加载聊天列表时，是否已经自动打开过最近一个会话
 let initialLoadDone = false;
@@ -893,7 +895,8 @@ async function sendMessage() {
                 chat_id: chatId,
                 mode: activeMode || "chat",
                 filename: activeMode === "file" ? selectedFilename : null,
-                allow_writes: allowWrites
+                allow_writes: allowWrites,
+                allow_workspace: allowWorkspace
             })
         });
 
@@ -1952,12 +1955,26 @@ function onAllowWritesChange() {
     try { localStorage.setItem("allowWrites", allowWrites ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
 }
 
+// 工作区只读开关：开启后后端才注册 list_dir / read_file / grep_code
+function onAllowWorkspaceChange() {
+    const box = $("allowWorkspace");
+    allowWorkspace = Boolean(box && box.checked);
+    box?.closest(".write-toggle")?.classList.toggle("on", allowWorkspace);
+    try { localStorage.setItem("allowWorkspace", allowWorkspace ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+}
+
 function restoreAllowWrites() {
     const box = $("allowWrites");
     if (!box) return;
     try { box.checked = localStorage.getItem("allowWrites") === "1"; } catch (_) { box.checked = false; }
     allowWrites = Boolean(box.checked);
     box.closest(".write-toggle")?.classList.toggle("on", allowWrites);
+
+    const wsBox = $("allowWorkspace");
+    if (!wsBox) return;
+    try { wsBox.checked = localStorage.getItem("allowWorkspace") === "1"; } catch (_) { wsBox.checked = false; }
+    allowWorkspace = Boolean(wsBox.checked);
+    wsBox.closest(".write-toggle")?.classList.toggle("on", allowWorkspace);
 }
 
 async function openLearningHub() {
