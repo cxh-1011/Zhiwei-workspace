@@ -19,6 +19,15 @@ MAX_CONTEXT_CHARS = max(8000, min(int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "2400
 MAX_TOOL_OUTPUT_CHARS = 6000
 MAX_TOKENS_PER_RUN = max(2000, min(int(os.getenv("AGENT_MAX_TOKENS_PER_RUN", "12000")), 40000))
 
+# 工作区工具分两组：读的一组，写的一组。写工具必须显式开启「允许改代码」才注册。
+WORKSPACE_READ_TOOLS = ("repo_map", "list_dir", "read_file", "grep_code", "git_status", "git_diff", "git_log")
+WORKSPACE_EDIT_TOOLS = ("write_file", "edit_file")
+
+# 工具参数长度上限：检索类工具 4k 字就够，写入类要把整个文件内容塞进参数里，
+# 用同一个上限会把正常改动拦成「参数过长」。
+MAX_ARGUMENT_CHARS = 4000
+MAX_EDIT_ARGUMENT_CHARS = 260_000
+
 # 取消标记：前端点「停止」后记录一笔，循环在每个轮次边界和每个工具调用前检查。
 # 用内存字典而不是数据库，因为它的生命周期只有一次请求；超过窗口的条目自动清理。
 _CANCEL: dict[str, float] = {}
@@ -175,13 +184,15 @@ def run_agent_stream(
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
+    allow_code_edit: bool = False,
     show_thinking: bool = False,
 ):
     """执行一次 Agent，边跑边产出事件。
 
-    事件类型：start / round / reasoning / token / tool_start / tool_end / limit / error / done。
+    事件类型：start / round / reasoning / token / tool_start / file_edit / tool_end / limit / error / done。
     - round：每个模型轮次开始时发一次，前端用来标注「第 N 轮」
     - reasoning：模型的思考过程（仅支持的服务商返回，内容不进入回答正文）
+    - file_edit：一次写入/修改落盘成功，带 path 与 diff，前端渲染成红绿行
     done 事件带完整结果，调用方据此落库。
     """
     run_id = uuid.uuid4().hex
@@ -207,16 +218,20 @@ def run_agent_stream(
     # 工作区只读工具同样默认不注册：只有用户开启「允许读项目文件」才可见。
     # 这一组全是只读的：看结构、读文件、搜代码、看 git 状态与历史。
     # 不能改文件，也不能执行命令。
-    if allow_workspace:
+    # 开启「允许改代码」时自动带上读工具——改代码前必须能先读代码。
+    if allow_workspace or allow_code_edit:
         tool_names = list(tool_names) + [
-            name for name in (
-                "repo_map", "list_dir", "read_file", "grep_code",
-                "git_status", "git_diff", "git_log",
-            )
-            if name not in tool_names
+            name for name in WORKSPACE_READ_TOOLS if name not in tool_names
         ]
 
-    context = {"mode": mode, "filename": filename}
+    # 写入工具只在「允许改代码」时注册，且必然同时具备只读能力。
+    if allow_code_edit:
+        tool_names = list(tool_names) + [
+            name for name in WORKSPACE_EDIT_TOOLS if name not in tool_names
+        ]
+
+    # run_id 传给工具，写入工具据此把备份落到 backups/agent-edits/<run_id>/
+    context = {"mode": mode, "filename": filename, "run_id": run_id, "allow_code_edit": allow_code_edit}
     prompt = SYSTEM_PROMPT
     if mode == "file":
         if image_path:
@@ -235,10 +250,10 @@ def run_agent_stream(
             "③ 勾选任务前先调用 list_learning_tasks 取得编号，不要猜；"
             "④ 写入后用一句话说明写了什么，方便用户核对。"
         )
-    if allow_workspace:
+    if allow_workspace or allow_code_edit:
         prompt += (
             "\n\n用户已开启「允许读项目文件」。你有七个只读工具：repo_map、list_dir、read_file、"
-            "grep_code、git_status、git_diff、git_log。只能看，不能改文件，也不能执行命令。"
+            "grep_code、git_status、git_diff、git_log。"
             "使用方式："
             "① 面对不熟悉的仓库，第一步调用 repo_map 拿整体结构与顶层符号，不要一上来就整仓扫读；"
             "② 用 grep_code 定位具体实现，再用 read_file(start_line=, max_lines=) 分段精读该处；"
@@ -246,6 +261,21 @@ def run_agent_stream(
             "避免把用户自己的修改当成待修复的问题；"
             "④ 引用代码必须写清「文件路径:行号」，没读到的内容不要编造；"
             "⑤ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
+        )
+    if allow_code_edit:
+        prompt += (
+            "\n\n用户已开启「允许改代码」。除只读工具外，你还能调用 write_file（新建或整体重写）"
+            "与 edit_file（按锚点局部替换）。规则："
+            "① 只有用户明确要求修改代码时才动手，不要主动「顺手优化」；"
+            "② 改之前必须先读目标文件，不要凭记忆或猜测写代码；"
+            "③ 已有文件优先用 edit_file：old_string 逐字复制原文（含缩进与相邻行），保证在文件里唯一，"
+            "一次只改一处；只有新建文件或确实需要整体重写时才用 write_file；"
+            "④ 不要为了「顺便格式化」而整文件重写，diff 越干净越好；"
+            "⑤ 工具报错（锚点不唯一、文件不存在、被沙箱拒绝）时，按错误提示修正后重试一次，"
+            "仍失败就停下来如实说明，不要反复试探路径；"
+            "⑥ 每次改动后用一句话说明改了哪个文件、改了什么、为什么；"
+            "⑦ 不能改 .env、数据库、依赖目录、备份目录，也不能执行命令或跑测试；"
+            "⑧ 单次运行最多改 20 个文件、单文件 200 KB，超出要拆成多轮。"
         )
 
     messages = [{"role": "system", "content": prompt}]
@@ -427,8 +457,10 @@ def run_agent_stream(
                 yield {"type": "tool_start", "tool": name, "args": _safe_args(raw_arguments)}
                 try:
                     arguments = json.loads(raw_arguments)
-                    if len(raw_arguments) > 4000:
-                        raise ValueError("工具参数过长")
+                    # 检索类参数 4k 就够；写入类要把整个文件塞进来，上限要放宽
+                    argument_limit = MAX_EDIT_ARGUMENT_CHARS if name in WORKSPACE_EDIT_TOOLS else MAX_ARGUMENT_CHARS
+                    if len(raw_arguments) > argument_limit:
+                        raise ValueError("工具参数过长（超过 %d 字符）" % argument_limit)
                     if not isinstance(arguments, dict):
                         raise ValueError("工具参数必须是 JSON 对象")
                 except (json.JSONDecodeError, ValueError) as exc:
@@ -457,6 +489,21 @@ def run_agent_stream(
                     "args": arguments, "ok": ok, "elapsed_ms": elapsed_ms,
                     "result_preview": result_content[:700], "result_data": result_data,
                 })
+                # 写入类工具成功落盘后单独发一个 file_edit 事件：前端拿它画 diff，
+                # 用户不用展开工具结果也能看到「到底改了哪几行」。
+                # 放在 tool_end 之前，前端才能把 diff 挂到刚建好的那条工具记录上。
+                if ok and name in WORKSPACE_EDIT_TOOLS and isinstance(result_data, dict):
+                    diff = result_data.get("diff")
+                    if diff:
+                        yield {
+                            "type": "file_edit", "tool": name,
+                            "path": result_data.get("path"),
+                            "added": result_data.get("added", 0),
+                            "removed": result_data.get("removed", 0),
+                            "created": bool(result_data.get("created")),
+                            "truncated": bool(result_data.get("diff_truncated")),
+                            "diff": diff,
+                        }
                 yield {
                     "type": "tool_end", "tool": name, "ok": ok,
                     "elapsed_ms": elapsed_ms, "preview": result_content[:700],
@@ -525,6 +572,7 @@ def run_agent(
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
+    allow_code_edit: bool = False,
     show_thinking: bool = False,
 ) -> dict:
     """非流式包装：把事件流跑完，返回旧格式结果，旧接口与测试继续可用。"""
@@ -539,6 +587,7 @@ def run_agent(
         allowed_tools=allowed_tools,
         allow_writes=allow_writes,
         allow_workspace=allow_workspace,
+        allow_code_edit=allow_code_edit,
         show_thinking=show_thinking,
     ):
         if event.get("type") == "done":

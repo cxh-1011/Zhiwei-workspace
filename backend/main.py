@@ -33,6 +33,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 from agent import run_agent, run_agent_stream, request_cancel
 from llm import ModelConfigError, chat_completion, test_connection
 import model_store
+from tools.edits import restore_edits
 
 from config import (
     APP_PASSWORD_HASH,
@@ -198,6 +199,9 @@ class Message(BaseModel):
     allow_writes: StrictBool = False
     # 是否允许助手只读访问工作区代码（list_dir / read_file / grep_code）。默认关闭。
     allow_workspace: StrictBool = False
+    # 是否允许助手修改工作区代码（write_file / edit_file）。默认关闭。
+    # 开启后自动带上只读工具：改代码前必须先能读代码。每次写入都会先备份。
+    allow_code_edit: StrictBool = False
     # 是否请求模型的思考过程（仅部分服务商支持，例如 Qwen3 系列）。默认关闭。
     show_thinking: StrictBool = False
 
@@ -320,6 +324,7 @@ def chat(message: Message):
             memory_context=ctx["memory_context"],
             allow_writes=message.allow_writes,
             allow_workspace=message.allow_workspace,
+            allow_code_edit=message.allow_code_edit,
             show_thinking=message.show_thinking,
         )
         _persist_chat(message.chat_id, message.text, result)
@@ -354,6 +359,7 @@ def chat_stream(message: Message):
                 memory_context=ctx["memory_context"],
                 allow_writes=message.allow_writes,
                 allow_workspace=message.allow_workspace,
+                allow_code_edit=message.allow_code_edit,
                 show_thinking=message.show_thinking,
             ):
                 if event.get("type") == "done":
@@ -829,6 +835,35 @@ def agent_run(run_id: str):
 @app.get("/agent_runs")
 def agent_runs(chat_id: int):
     return {"items": get_agent_runs_for_chat(chat_id)}
+
+
+# ======================
+# 代码改动的撤销
+# ======================
+
+@app.post("/code/undo/{run_id}")
+def undo_code_edits(run_id: str):
+    """把某次运行里的文件改动整体还原。
+
+    依据 agent_steps 里记录的备份路径**逆序**还原（同一文件改两次时，先还后一次再还前一次，
+    结果才是运行前的样子）；新建的文件直接删除。
+    如果某个文件在这次改动之后又被改过，跳过并在 skipped 里说明，绝不覆盖用户后来的编辑。
+    """
+    record = get_agent_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="没有找到这次运行记录。")
+    try:
+        result = restore_edits(record["steps"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.info(
+        "撤销代码改动 | run_id=%s | 还原 %d | 删除 %d | 跳过 %d",
+        run_id, len(result["restored"]), len(result["removed"]), len(result["skipped"]),
+    )
+    if not result["changed"] and not result["skipped"]:
+        return {**result, "message": "这次运行没有需要撤销的文件改动。"}
+    return result
 
 
 @app.get("/memories")
