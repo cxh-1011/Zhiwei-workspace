@@ -13,6 +13,9 @@ let paperReady = false;
 let allowWrites = false;
 // 是否允许助手只读访问工作区代码。默认关闭。
 let allowWorkspace = false;
+// 是否允许助手修改工作区代码（write_file / edit_file）。默认关闭。
+// 开启后后端会自动带上只读工具，每次写入都会先备份，改完可以一键撤销。
+let allowCodeEdit = false;
 // 是否向模型请求思考过程（仅部分模型支持）。开启后回答上方会多出「思考」段落。
 let showThinking = false;
 
@@ -809,7 +812,7 @@ function openChat(id) {
                         const bubble = document.createElement("div");
                         bubble.className = "ai";
                         if (Array.isArray(run.steps) && run.steps.length) {
-                            bubble.appendChild(renderAgentTrace(run.steps, run.status, run.rounds, run.duration_ms));
+                            bubble.appendChild(renderAgentTrace(run.steps, run.status, run.rounds, run.duration_ms, undefined, run.run_id));
                         }
                         const answer = document.createElement("div");
                         answer.className = "agent-answer";
@@ -854,7 +857,9 @@ const TOOL_LABELS = {
     repo_map: "查看仓库结构",
     git_status: "查看改动状态",
     git_diff: "查看代码差异",
-    git_log: "查看提交历史"
+    git_log: "查看提交历史",
+    write_file: "写入文件",
+    edit_file: "修改文件"
 };
 
 function toolLabel(name) {
@@ -885,7 +890,10 @@ const ARG_LABELS = {
     start_line: "起始行",
     max_lines: "读取行数",
     max_chars: "输出上限",
-    limit: "条数"
+    limit: "条数",
+    old_string: "原文锚点",
+    new_string: "替换为",
+    replace_all: "替换全部"
 };
 
 function formatArgValue(value) {
@@ -1011,6 +1019,59 @@ function liveToolEnd(trace, name, ok, elapsedMs, preview) {
 
     trace.body.scrollTop = trace.body.scrollHeight;
     liveSetStatus(trace, (ok ? "已完成 " : "未成功 ") + toolLabel(name), true);
+}
+
+// 一段 unified diff → 红绿行。折叠标题就是「改了哪个文件、增删几行」。
+// 传入的 edit 结构：{ path, added, removed, created, diff }
+function renderDiffBlock(edit, open) {
+    const details = document.createElement("details");
+    details.className = "edit-diff";
+    details.open = Boolean(open);
+
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.className = "edit-path";
+    label.textContent = (edit.created ? "新建 " : "改动 ") + (edit.path || "");
+    const stat = document.createElement("span");
+    stat.className = "edit-stat";
+    stat.textContent = "+" + (Number(edit.added) || 0) + " −" + (Number(edit.removed) || 0);
+    summary.append(label, stat);
+    details.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "diff-body";
+    const lines = String(edit.diff || "").split("\n");
+    // 行数太多时只画前 400 行，避免一条消息塞几千个节点把页面拖慢
+    lines.slice(0, 400).forEach(line => {
+        const row = document.createElement("div");
+        let cls = "diff-line";
+        if (line.startsWith("+++") || line.startsWith("---")) cls += " diff-meta";
+        else if (line.startsWith("@@")) cls += " diff-hunk";
+        else if (line.startsWith("+")) cls += " diff-add";
+        else if (line.startsWith("-")) cls += " diff-del";
+        row.className = cls;
+        row.textContent = line || " ";
+        body.appendChild(row);
+    });
+    if (lines.length > 400) {
+        const more = document.createElement("div");
+        more.className = "diff-line diff-meta";
+        more.textContent = "…（还有 " + (lines.length - 400) + " 行未显示）";
+        body.appendChild(more);
+    }
+    details.appendChild(body);
+    return details;
+}
+
+// 流式过程中收到 file_edit：把 diff 挂到刚建的那条工具记录里，
+// 用户不用等回答结束就能看到改了哪几行。
+function liveFileEdit(trace, event) {
+    if (!trace) return;
+    const pending = (trace.pending || []).find(item => item.name === event.tool);
+    const host = pending ? pending.row.querySelector(".trace-live-body") : null;
+    (host || trace.body).appendChild(renderDiffBlock(event, true));
+    trace.body.scrollTop = trace.body.scrollHeight;
+    liveSetStatus(trace, "已修改 " + (event.path || "文件"), true);
 }
 
 function liveReasoning(trace, text) {
@@ -1225,7 +1286,7 @@ function finalizeStream(box, live, answer, event, buffer, question) {
         if (hasSteps) {
             // 过程面板就地替换：位置不变，用户的视线不用重新找
             live.root.replaceWith(
-                renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true)
+                renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true, event.run_id)
             );
         } else {
             live.root.remove();
@@ -1234,7 +1295,7 @@ function finalizeStream(box, live, answer, event, buffer, question) {
     } else if (hasSteps) {
 
         box.insertBefore(
-            renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true),
+            renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true, event.run_id),
             box.firstChild
         );
 
@@ -1397,6 +1458,7 @@ async function sendMessage() {
                 filename: activeMode === "file" ? selectedFilename : null,
                 allow_writes: allowWrites,
                 allow_workspace: allowWorkspace,
+                allow_code_edit: allowCodeEdit,
                 show_thinking: showThinking
             },
             event => {
@@ -1419,9 +1481,12 @@ async function sendMessage() {
                         liveToolStart(live, event.tool, event.args);
                         break;
 
+                    case "file_edit":
+                        liveFileEdit(live, event);
+                        break;
+
                     case "tool_end":
-                        liveToolEnd(live, event.tool, event.ok, event.elapsed_ms, event.preview);
-                        // 多轮之间留一个空行，免得「我查一下…」和正式回答黏在一起
+                        liveToolEnd(live, event.tool, event.ok, event.elapsed_ms, event.preview);                        // 多轮之间留一个空行，免得「我查一下…」和正式回答黏在一起
                         if (buffer.trim() && !buffer.endsWith("\n\n")) {
 
                             buffer += "\n\n";
@@ -1594,7 +1659,7 @@ function traceTimeLabel(elapsedMs) {
     return elapsedMs >= 1000 ? (elapsedMs / 1000).toFixed(1) + " 秒" : elapsedMs + " 毫秒";
 }
 
-function renderAgentTrace(steps, status, rounds, durationMs, forceOpen) {
+function renderAgentTrace(steps, status, rounds, durationMs, forceOpen, runId) {
     const details = document.createElement("details");
     details.className = "agent-trace";
     details.open = forceOpen === undefined ? traceOpenPref() : Boolean(forceOpen);
@@ -1655,6 +1720,10 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen) {
                 item.appendChild(box);
             }
 
+            // 写入类工具在步骤里存了完整 diff，刷新后也能回看改了什么
+            const edit = step.result_data && step.result_data.diff ? step.result_data : null;
+            if (edit) item.appendChild(renderDiffBlock(edit, false));
+
         } else if (step.kind === "llm_call") {
             title.textContent = `第 ${step.round_no || 1} 轮 · ${step.reasoning ? "模型思考" : "分析"}`;
             item.className = "trace-think-item";
@@ -1702,6 +1771,21 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen) {
 
     details.appendChild(list);
 
+    // 有文件改动就提供「一键撤销」。依据运行记录里的备份逆序还原，新建的文件会被删除。
+    const edited = steps.filter(step => step.kind === "tool_call" && step.ok
+        && step.result_data && step.result_data.diff);
+    if (edited.length && runId) {
+        const bar = document.createElement("div");
+        bar.className = "edit-undo-bar";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "edit-undo";
+        button.textContent = "撤销这次改动（" + edited.length + " 处）";
+        button.addEventListener("click", () => undoRunEdits(runId, button));
+        bar.appendChild(button);
+        details.appendChild(bar);
+    }
+
     if (status && status !== "ok") {
         const notice = document.createElement("div");
         notice.className = "trace-status";
@@ -1712,6 +1796,27 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen) {
         details.appendChild(notice);
     }
     return details;
+}
+
+// 撤销一次运行里的文件改动。后端按备份逆序还原；被用户后来改过的文件会跳过。
+async function undoRunEdits(runId, button) {
+    if (!runId || !button) return;
+    if (!confirm("把这次运行改过的文件还原到运行前？新建的文件会被删除，运行后又改过的文件会被跳过。")) return;
+
+    button.disabled = true;
+    button.textContent = "正在撤销…";
+    try {
+        const data = await apiJson("/code/undo/" + encodeURIComponent(runId), { method: "POST" });
+        const parts = [];
+        if ((data.restored || []).length) parts.push("还原 " + data.restored.length + " 个文件");
+        if ((data.removed || []).length) parts.push("删除 " + data.removed.length + " 个新建文件");
+        if ((data.skipped || []).length) parts.push("跳过 " + data.skipped.length + " 个（" + (data.skipped[0].reason || "") + "）");
+        button.textContent = parts.length ? parts.join("，") : (data.message || "没有需要撤销的改动");
+        button.classList.add("done");
+    } catch (err) {
+        button.disabled = false;
+        button.textContent = "撤销失败：" + ((err && err.message) || "未知错误");
+    }
 }
 
 
@@ -2558,6 +2663,24 @@ function onAllowWorkspaceChange() {
     try { localStorage.setItem("allowWorkspace", allowWorkspace ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
 }
 
+// 改代码开关：开启后后端才注册 write_file / edit_file。
+// 改代码必然要先读代码，所以勾上它时顺手把「允许读代码」也打开，
+// 避免出现「能写不能读」这种做不了事的状态。
+function onAllowCodeEditChange() {
+    const box = $("allowCodeEdit");
+    allowCodeEdit = Boolean(box && box.checked);
+    box?.closest(".write-toggle")?.classList.toggle("on", allowCodeEdit);
+    try { localStorage.setItem("allowCodeEdit", allowCodeEdit ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+
+    if (allowCodeEdit && !allowWorkspace) {
+        const wsBox = $("allowWorkspace");
+        if (wsBox) {
+            wsBox.checked = true;
+            onAllowWorkspaceChange();
+        }
+    }
+}
+
 // 思考过程开关：开启后请求模型返回 reasoning_content，显示在过程面板里
 function onShowThinkingChange() {
     const box = $("showThinking");
@@ -2584,6 +2707,13 @@ function restoreAllowWrites() {
     try { thinkBox.checked = localStorage.getItem("showThinking") === "1"; } catch (_) { thinkBox.checked = false; }
     showThinking = Boolean(thinkBox.checked);
     thinkBox.closest(".write-toggle")?.classList.toggle("on", showThinking);
+
+    const codeBox = $("allowCodeEdit");
+    if (!codeBox) return;
+    try { codeBox.checked = localStorage.getItem("allowCodeEdit") === "1"; } catch (_) { codeBox.checked = false; }
+    allowCodeEdit = Boolean(codeBox.checked);
+    codeBox.closest(".write-toggle")?.classList.toggle("on", allowCodeEdit);
+    // 恢复时不开「读代码」：只要用户自己勾过写，读由后端隐式带上，界面不改用户的勾选
 }
 
 async function openLearningHub() {
