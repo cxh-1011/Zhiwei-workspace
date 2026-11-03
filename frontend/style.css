@@ -44,3 +44,37 @@
 .provider-status.error{border-color:#f3dada;background:#fff7f7;color:#aa5353}
 .hub-item-actions button.danger{color:#a35f66}
 @media(max-width:600px){.model-pill{max-width:112px}.model-pill #modelPillText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+
+/* ===== 过程面板：让「模型做了什么」在回答生成时就看得见 ===== */
+.agent-trace.live{border-color:#e2e6f4;background:#fbfbfe}
+.agent-trace.live summary{display:flex;align-items:center;gap:7px;color:#5b64ab}
+.agent-trace>summary{display:flex;align-items:center;gap:7px}
+.trace-spin{display:inline-block;flex:none;width:9px;height:9px;border-radius:50%;border:1.5px solid #ccd2ec;border-top-color:#6f7ac4;animation:traceSpin .85s linear infinite;animation-play-state:paused}
+.agent-trace.working .trace-spin{animation-play-state:running}
+@keyframes traceSpin{to{transform:rotate(360deg)}}
+
+.trace-live{display:grid;gap:7px;margin-top:10px;max-height:250px;overflow:auto;padding-right:2px}
+.trace-live-round{padding-top:6px;border-top:1px dashed #e8eaf2;color:#a4aab8;font-size:9px;letter-spacing:.05em}
+.trace-live-round:first-child{padding-top:0;border-top:none}
+.trace-live-item{display:flex;gap:7px;align-items:flex-start;color:#4f5766;font-size:11px;line-height:1.55}
+.trace-live-icon{flex:none;width:12px;color:#9aa2b2;font-size:10px;line-height:16px;text-align:center}
+.trace-live-item.running .trace-live-icon{color:#6f7ac4}
+.trace-live-item.ok .trace-live-icon{color:#3f8a58}
+.trace-live-item.failed .trace-live-icon{color:#b4644f}
+.trace-live-item.reasoning .trace-live-icon{color:#7c86c9}
+.trace-live-body{flex:1;min-width:0}
+.trace-live-title{color:#3c4350;font-size:11px;font-weight:600}
+.trace-live-time{float:right;margin-left:8px;color:#aab0bc;font-size:9px;font-weight:400}
+.trace-live-sub{color:#8b91a0;font-size:10px;overflow-wrap:anywhere}
+.trace-live-result{display:-webkit-box;margin-top:3px;overflow:hidden;color:#7d8492;font-size:10px;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.trace-live-reasoning{max-height:150px;margin:4px 0 0;padding:6px 8px;overflow:auto;border-left:2px solid #dfe3f5;border-radius:0 6px 6px 0;background:#f4f5fb;color:#6f7686;font-family:inherit;font-size:10px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+.trace-live-note{color:#a35a3f;font-size:10px;line-height:1.6}
+.trace-live-note.error{color:#b0524a}
+
+.trace-think{max-height:190px;margin:5px 0 0;padding:7px 9px;overflow:auto;border-left:2px solid #dfe3f5;border-radius:0 6px 6px 0;background:#f4f5fb;color:#6f7686;font-size:10px;line-height:1.68;white-space:pre-wrap;overflow-wrap:anywhere}
+.trace-result{margin-top:5px}
+.trace-result summary{cursor:pointer;color:#8a90a0;font-size:10px;list-style:none}
+.trace-result summary::-webkit-details-marker{display:none}
+.trace-result summary::before{content:"▸ ";}
+.trace-result[open] summary::before{content:"▾ ";}
+@media(max-width:600px){.composer-left{flex-wrap:wrap}.trace-live{max-height:190px}}

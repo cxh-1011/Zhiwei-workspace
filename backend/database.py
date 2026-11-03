@@ -131,6 +131,9 @@ def init_db():
     _ensure_column(cursor, "agent_runs", "provider", "TEXT")
     _ensure_column(cursor, "agent_runs", "model", "TEXT")
 
+    # agent_steps 记录每一轮的思考摘要，回看历史时能还原「模型当时怎么想的」
+    _ensure_column(cursor, "agent_steps", "reasoning", "TEXT")
+
     conn.commit()
 
     conn.close()
@@ -391,12 +394,12 @@ def save_agent_run(chat_id, question, result):
     )
     for index, step in enumerate(result.get("steps", [])):
         cursor.execute(
-            "INSERT INTO agent_steps(run_id,step_index,round_no,kind,tool,args,ok,elapsed_ms,result_preview,result_data,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agent_steps(run_id,step_index,round_no,kind,tool,args,ok,elapsed_ms,result_preview,result_data,reason,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (result["run_id"], index, step.get("round_no"), step.get("kind"), step.get("tool"),
              json.dumps(step.get("args", {}), ensure_ascii=False),
              None if step.get("ok") is None else int(bool(step.get("ok"))), step.get("elapsed_ms"),
              step.get("result_preview"), json.dumps(step.get("result_data", {}), ensure_ascii=False),
-             step.get("reason") or step.get("detail")),
+             step.get("reason") or step.get("detail"), step.get("reasoning")),
         )
     conn.commit()
     conn.close()
@@ -410,10 +413,10 @@ def get_agent_run(run_id):
     if not run:
         conn.close()
         return None
-    cursor.execute("SELECT step_index,round_no,kind,tool,args,ok,elapsed_ms,result_preview,result_data,reason FROM agent_steps WHERE run_id=? ORDER BY step_index", (run_id,))
+    cursor.execute("SELECT step_index,round_no,kind,tool,args,ok,elapsed_ms,result_preview,result_data,reason,reasoning FROM agent_steps WHERE run_id=? ORDER BY step_index", (run_id,))
     steps = cursor.fetchall()
     conn.close()
-    keys = ("step_index", "round_no", "kind", "tool", "args", "ok", "elapsed_ms", "result_preview", "result_data", "reason")
+    keys = ("step_index", "round_no", "kind", "tool", "args", "ok", "elapsed_ms", "result_preview", "result_data", "reason", "reasoning")
     parsed_steps = []
     for row in steps:
         item = dict(zip(keys, row))

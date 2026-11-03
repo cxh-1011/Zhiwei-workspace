@@ -13,6 +13,8 @@ let paperReady = false;
 let allowWrites = false;
 // 是否允许助手只读访问工作区代码。默认关闭。
 let allowWorkspace = false;
+// 是否向模型请求思考过程（仅部分模型支持）。开启后回答上方会多出「思考」段落。
+let showThinking = false;
 
 // 首次加载聊天列表时，是否已经自动打开过最近一个会话
 let initialLoadDone = false;
@@ -855,6 +857,196 @@ function toolLabel(name) {
     return TOOL_LABELS[name] || name || "工具";
 }
 
+// 工具参数 → 中文名。目的不是逐个翻译，而是让「他到底查了什么」一眼能读懂。
+const ARG_LABELS = {
+    query: "检索内容",
+    question: "问题",
+    keyword: "关键词",
+    pattern: "匹配模式",
+    filename: "文件",
+    file: "文件",
+    path: "路径",
+    dir: "目录",
+    k: "返回条数",
+    top_k: "返回条数",
+    category: "分类",
+    content: "内容",
+    task_id: "任务编号",
+    status: "状态",
+    url: "地址",
+    doi: "DOI",
+    title: "标题"
+};
+
+function formatArgValue(value) {
+    if (value === null || value === undefined) return "";
+    let text = typeof value === "object" ? JSON.stringify(value) : String(value);
+    text = text.replace(/\s+/g, " ").trim();
+    return text.length > 90 ? text.slice(0, 90) + "…" : text;
+}
+
+// 把参数对象压成一行可读文字，最多三条，避免长参数把面板撑爆
+function describeArgs(args) {
+    if (!args || typeof args !== "object") return "";
+    const parts = [];
+    Object.keys(args).forEach(key => {
+        const value = formatArgValue(args[key]);
+        if (!value) return;
+        parts.push((ARG_LABELS[key] || key) + "：" + value);
+    });
+    if (!parts.length) return "";
+    return parts.slice(0, 3).join(" · ");
+}
+
+// 流式过程中的「过程面板」。边跑边往里加条目，跑完由 renderAgentTrace 接管。
+function createLiveTrace() {
+    const root = document.createElement("details");
+    root.className = "agent-trace live";
+    root.open = true;
+
+    const summary = document.createElement("summary");
+
+    const spin = document.createElement("span");
+    spin.className = "trace-spin";
+
+    const label = document.createElement("span");
+    label.textContent = "正在思考…";
+
+    summary.append(spin, label);
+
+    const body = document.createElement("div");
+    body.className = "trace-live";
+
+    root.append(summary, body);
+
+    return { root, body, label, pending: [], reasoningEl: null, toolCount: 0 };
+}
+
+function liveSetStatus(trace, text, spinning) {
+    if (!trace) return;
+    trace.label.textContent = text;
+    trace.root.classList.toggle("working", Boolean(spinning));
+}
+
+function liveAddRound(trace, round, max) {
+    if (!trace) return;
+    const row = document.createElement("div");
+    row.className = "trace-live-round";
+    row.textContent = round === 1 ? "第 1 轮 · 理解问题" : `第 ${round} 轮 · 继续分析`;
+    trace.body.appendChild(row);
+    trace.body.scrollTop = trace.body.scrollHeight;
+    liveSetStatus(trace, round === 1 ? "第 1 轮 · 分析问题" : `第 ${round} 轮 · 继续分析`, true);
+}
+
+function liveToolStart(trace, name, args) {
+    if (!trace) return;
+    const row = document.createElement("div");
+    row.className = "trace-live-item running";
+
+    const icon = document.createElement("span");
+    icon.className = "trace-live-icon";
+    icon.textContent = "◐";
+
+    const body = document.createElement("div");
+    body.className = "trace-live-body";
+
+    const title = document.createElement("div");
+    title.className = "trace-live-title";
+    title.textContent = toolLabel(name);
+
+    const detail = document.createElement("div");
+    detail.className = "trace-live-sub";
+    const described = describeArgs(args);
+    detail.textContent = described || "正在执行…";
+
+    body.append(title, detail);
+    row.append(icon, body);
+    trace.body.appendChild(row);
+
+    trace.toolCount += 1;
+    trace.pending.push({ name: name, row: row, icon: icon });
+    trace.body.scrollTop = trace.body.scrollHeight;
+
+    liveSetStatus(trace, "正在" + toolLabel(name) + "…", true);
+}
+
+function liveToolEnd(trace, name, ok, elapsedMs, preview) {
+    if (!trace) return;
+    const index = trace.pending.findIndex(item => item.name === name);
+    const target = index >= 0 ? trace.pending.splice(index, 1)[0] : null;
+    if (!target) return;
+
+    target.row.classList.remove("running");
+    target.row.classList.add(ok ? "ok" : "failed");
+    target.icon.textContent = ok ? "✓" : "!";
+
+    const title = target.row.querySelector(".trace-live-title");
+    if (title) {
+        const time = document.createElement("span");
+        time.className = "trace-live-time";
+        time.textContent = elapsedMs == null ? "" : (elapsedMs >= 1000
+            ? (elapsedMs / 1000).toFixed(1) + " 秒"
+            : elapsedMs + " 毫秒");
+        title.appendChild(time);
+    }
+
+    // 结果摘要：让用户看到「查到了什么」，而不是只知道调用了工具
+    const snippet = String(preview || "").replace(/\s+/g, " ").trim();
+    if (snippet) {
+        const result = document.createElement("div");
+        result.className = "trace-live-result";
+        result.textContent = (ok ? "结果：" : "未成功：") + (snippet.length > 110 ? snippet.slice(0, 110) + "…" : snippet);
+        target.row.querySelector(".trace-live-body")?.appendChild(result);
+    }
+
+    trace.body.scrollTop = trace.body.scrollHeight;
+    liveSetStatus(trace, (ok ? "已完成 " : "未成功 ") + toolLabel(name), true);
+}
+
+function liveReasoning(trace, text) {
+    if (!trace || !text) return;
+    if (!trace.reasoningEl) {
+        const row = document.createElement("div");
+        row.className = "trace-live-item reasoning";
+
+        const icon = document.createElement("span");
+        icon.className = "trace-live-icon";
+        icon.textContent = "✻";
+
+        const body = document.createElement("div");
+        body.className = "trace-live-body";
+
+        const title = document.createElement("div");
+        title.className = "trace-live-title";
+        title.textContent = "模型思考";
+
+        // 用 div 而不是 pre：全局 pre 样式是深色代码块，会把思考内容渲染成一坨黑底
+        const pre = document.createElement("div");
+        pre.className = "trace-live-reasoning";
+
+        body.append(title, pre);
+        row.append(icon, body);
+        trace.body.appendChild(row);
+
+        trace.reasoningEl = pre;
+    }
+    trace.reasoningEl.textContent += text;
+    trace.body.scrollTop = trace.body.scrollHeight;
+    liveSetStatus(trace, "思考中…", true);
+}
+
+function liveNote(trace, text, kind) {
+    if (!trace) return;
+    liveSetStatus(trace, text, false);
+    // 限制类提示已经显示在上面一行了，正文里不再重复；错误要留在列表里方便回看
+    if (kind !== "error") return;
+    const row = document.createElement("div");
+    row.className = "trace-live-note" + (kind ? " " + kind : "");
+    row.textContent = text;
+    trace.body.appendChild(row);
+    trace.body.scrollTop = trace.body.scrollHeight;
+}
+
 // 正在进行的流式请求：{ controller, runId, stopped, timer }
 let activeStream = null;
 
@@ -1013,10 +1205,30 @@ function stopGeneration() {
 }
 
 
-// 收尾：把流式纯文本换成 Markdown，并把过程时间线插到回答上方
-function finalizeStream(box, statusLine, answer, event, buffer, question) {
+// 收尾：把流式纯文本换成 Markdown，并把过程面板定格成完整时间线
+function finalizeStream(box, live, answer, event, buffer, question) {
 
-    if (statusLine && statusLine.parentNode) statusLine.remove();
+    const hasSteps = Array.isArray(event.steps) && event.steps.length;
+
+    if (live && live.root && live.root.parentNode) {
+
+        if (hasSteps) {
+            // 过程面板就地替换：位置不变，用户的视线不用重新找
+            live.root.replaceWith(
+                renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true)
+            );
+        } else {
+            live.root.remove();
+        }
+
+    } else if (hasSteps) {
+
+        box.insertBefore(
+            renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms, true),
+            box.firstChild
+        );
+
+    }
 
     // 后端可能因为中断而返回空字符串，这时用已经流式收到的内容兜底
     let reply = (event.reply === undefined || event.reply === null || event.reply === "")
@@ -1028,15 +1240,6 @@ function finalizeStream(box, statusLine, answer, event, buffer, question) {
     if (buffer && reply && buffer.length > reply.length && buffer.trim().endsWith(reply.trim())) {
 
         reply = buffer;
-
-    }
-
-    if (Array.isArray(event.steps) && event.steps.length) {
-
-        box.insertBefore(
-            renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms),
-            box.firstChild
-        );
 
     }
 
@@ -1134,17 +1337,14 @@ async function sendMessage() {
 
     box.className = "ai";
 
-    const statusLine = document.createElement("div");
-
-    statusLine.className = "stream-status";
-
-    statusLine.textContent = "正在思考…";
+    // 过程面板挂在回答上方：先看到「他做了什么」，再看到答案
+    const live = createLiveTrace();
 
     const answer = document.createElement("div");
 
     answer.className = "agent-answer";
 
-    box.appendChild(statusLine);
+    box.appendChild(live.root);
 
     box.appendChild(answer);
 
@@ -1186,7 +1386,8 @@ async function sendMessage() {
                 mode: activeMode || "chat",
                 filename: activeMode === "file" ? selectedFilename : null,
                 allow_writes: allowWrites,
-                allow_workspace: allowWorkspace
+                allow_workspace: allowWorkspace,
+                show_thinking: showThinking
             },
             event => {
 
@@ -1196,16 +1397,20 @@ async function sendMessage() {
                         if (activeStream) activeStream.runId = event.run_id;
                         break;
 
+                    case "round":
+                        liveAddRound(live, event.round, event.max_rounds);
+                        break;
+
+                    case "reasoning":
+                        liveReasoning(live, event.text);
+                        break;
+
                     case "tool_start":
-                        statusLine.hidden = false;
-                        statusLine.classList.add("active");
-                        statusLine.textContent = "正在" + toolLabel(event.tool) + "…";
+                        liveToolStart(live, event.tool, event.args);
                         break;
 
                     case "tool_end":
-                        statusLine.hidden = false;
-                        statusLine.classList.remove("active");
-                        statusLine.textContent = (event.ok ? "已完成 " : "未成功 ") + toolLabel(event.tool);
+                        liveToolEnd(live, event.tool, event.ok, event.elapsed_ms, event.preview);
                         // 多轮之间留一个空行，免得「我查一下…」和正式回答黏在一起
                         if (buffer.trim() && !buffer.endsWith("\n\n")) {
 
@@ -1235,18 +1440,16 @@ async function sendMessage() {
                         break;
 
                     case "limit":
-                        statusLine.hidden = false;
-                        statusLine.textContent = event.reason || "达到保护限制";
+                        liveNote(live, event.reason || "达到保护限制", "limit");
                         break;
 
                     case "error":
-                        statusLine.hidden = false;
-                        statusLine.textContent = event.message || "回答中断";
+                        liveNote(live, event.message || "回答中断", "error");
                         break;
 
                     case "done":
                         finished = true;
-                        finalizeStream(box, statusLine, answer, event, buffer, text);
+                        finalizeStream(box, live, answer, event, buffer, text);
                         break;
 
                 }
@@ -1259,21 +1462,11 @@ async function sendMessage() {
 
         if (err && err.name === "AbortError") {
 
-            statusLine.hidden = false;
-
-            statusLine.textContent = "已停止";
+            liveSetStatus(live, "已停止", false);
 
         } else {
 
-            statusLine.hidden = true;
-
-            const tip = document.createElement("div");
-
-            tip.className = "stream-error";
-
-            tip.textContent = "请求失败：" + ((err && err.message) || "未知错误");
-
-            box.appendChild(tip);
+            liveNote(live, "请求失败：" + ((err && err.message) || "未知错误"), "error");
 
         }
 
@@ -1285,6 +1478,11 @@ async function sendMessage() {
 
             answer.innerHTML = renderMarkdown(buffer);
 
+        }
+
+        // 请求异常结束时面板还停在「正在…」，收尾成一句话，不留空转的转圈
+        if (!finished && live.root && live.root.parentNode) {
+            liveSetStatus(live, live.toolCount ? "本次回答未完整结束" : "未完成", false);
         }
 
         activeStream = null;
@@ -1376,45 +1574,97 @@ function typeWriter(element, text, speed = 30) {
 
 }
 
-function renderAgentTrace(steps, status, rounds, durationMs) {
+// 用户展开过一次过程面板，之后的消息就默认展开。只是本机偏好，不上传。
+function traceOpenPref() {
+    try { return localStorage.getItem("agentTraceOpen") === "1"; } catch (_) { return false; }
+}
+
+function traceTimeLabel(elapsedMs) {
+    if (elapsedMs == null) return "";
+    return elapsedMs >= 1000 ? (elapsedMs / 1000).toFixed(1) + " 秒" : elapsedMs + " 毫秒";
+}
+
+function renderAgentTrace(steps, status, rounds, durationMs, forceOpen) {
     const details = document.createElement("details");
     details.className = "agent-trace";
+    details.open = forceOpen === undefined ? traceOpenPref() : Boolean(forceOpen);
+    details.addEventListener("toggle", () => {
+        try { localStorage.setItem("agentTraceOpen", details.open ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+    });
+
     const summary = document.createElement("summary");
     const tools = steps.filter(step => step.kind === "tool_call");
-    const headline = tools.length
-        ? `已调用 ${tools.length} 个工具 · ${rounds || 1} 轮 · ${((durationMs || 0) / 1000).toFixed(1)} 秒`
-        : `分析完成 · ${((durationMs || 0) / 1000).toFixed(1)} 秒`;
-    summary.textContent = "⚙　" + headline;
+    const thoughts = steps.filter(step => step.kind === "llm_call" && step.reasoning);
+    const seconds = ((durationMs || 0) / 1000).toFixed(1);
+    const pieces = [];
+    if (tools.length) pieces.push(`调用了 ${tools.length} 个工具`);
+    pieces.push(`${rounds || 1} 轮`);
+    if (thoughts.length) pieces.push("含思考过程");
+    pieces.push(`${seconds} 秒`);
+    summary.textContent = "⚙　" + pieces.join(" · ");
     details.appendChild(summary);
+
     const list = document.createElement("ol");
     list.className = "agent-trace-list";
-    const labels = TOOL_LABELS;
+
     steps.forEach(step => {
         const item = document.createElement("li");
         const title = document.createElement("strong");
+
         if (step.kind === "tool_call") {
-            title.textContent = (step.ok ? "✓ " : "! ") + (labels[step.tool] || step.tool);
+            title.textContent = (step.ok ? "✓ " : "! ") + toolLabel(step.tool);
             item.className = step.ok ? "trace-ok" : "trace-error";
-            const query = step.args && (step.args.query || step.args.question);
-            if (query) {
-                const queryLine = document.createElement("div");
-                queryLine.className = "trace-detail";
-                queryLine.textContent = "检索内容：" + query;
-                item.appendChild(title);
-                item.appendChild(queryLine);
-            } else item.appendChild(title);
-            if (step.elapsed_ms != null) {
-                const time = document.createElement("span");
-                time.className = "trace-time";
-                time.textContent = `${step.elapsed_ms} ms`;
-                item.appendChild(time);
+            item.appendChild(title);
+
+            const time = traceTimeLabel(step.elapsed_ms);
+            if (time) {
+                const span = document.createElement("span");
+                span.className = "trace-time";
+                span.textContent = time;
+                item.appendChild(span);
             }
+
+            const described = describeArgs(step.args);
+            if (described) {
+                const line = document.createElement("div");
+                line.className = "trace-detail";
+                line.textContent = described;
+                item.appendChild(line);
+            }
+
             if (step.result_preview) {
+                // 结果默认折叠：过程要看得见，但不能把回答挤出屏幕
+                const box = document.createElement("details");
+                box.className = "trace-result";
+                const head = document.createElement("summary");
+                head.textContent = step.ok ? "查看返回内容" : "查看失败原因";
                 const preview = document.createElement("p");
                 preview.className = "trace-preview";
                 preview.textContent = step.result_preview;
-                item.appendChild(preview);
+                box.append(head, preview);
+                item.appendChild(box);
             }
+
+        } else if (step.kind === "llm_call") {
+            title.textContent = `第 ${step.round_no || 1} 轮 · ${step.reasoning ? "模型思考" : "分析"}`;
+            item.className = "trace-think-item";
+            item.appendChild(title);
+
+            const time = traceTimeLabel(step.elapsed_ms);
+            if (time) {
+                const span = document.createElement("span");
+                span.className = "trace-time";
+                span.textContent = time;
+                item.appendChild(span);
+            }
+
+            if (step.reasoning) {
+                const think = document.createElement("p");
+                think.className = "trace-think";
+                think.textContent = step.reasoning;
+                item.appendChild(think);
+            }
+
         } else if (step.kind === "limit") {
             title.textContent = "达到保护限制";
             item.className = "trace-limit";
@@ -1436,9 +1686,12 @@ function renderAgentTrace(steps, status, rounds, durationMs) {
             title.textContent = "分析问题";
             item.appendChild(title);
         }
+
         list.appendChild(item);
     });
+
     details.appendChild(list);
+
     if (status && status !== "ok") {
         const notice = document.createElement("div");
         notice.className = "trace-status";
@@ -2295,6 +2548,14 @@ function onAllowWorkspaceChange() {
     try { localStorage.setItem("allowWorkspace", allowWorkspace ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
 }
 
+// 思考过程开关：开启后请求模型返回 reasoning_content，显示在过程面板里
+function onShowThinkingChange() {
+    const box = $("showThinking");
+    showThinking = Boolean(box && box.checked);
+    box?.closest(".write-toggle")?.classList.toggle("on", showThinking);
+    try { localStorage.setItem("showThinking", showThinking ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+}
+
 function restoreAllowWrites() {
     const box = $("allowWrites");
     if (!box) return;
@@ -2307,6 +2568,12 @@ function restoreAllowWrites() {
     try { wsBox.checked = localStorage.getItem("allowWorkspace") === "1"; } catch (_) { wsBox.checked = false; }
     allowWorkspace = Boolean(wsBox.checked);
     wsBox.closest(".write-toggle")?.classList.toggle("on", allowWorkspace);
+
+    const thinkBox = $("showThinking");
+    if (!thinkBox) return;
+    try { thinkBox.checked = localStorage.getItem("showThinking") === "1"; } catch (_) { thinkBox.checked = false; }
+    showThinking = Boolean(thinkBox.checked);
+    thinkBox.closest(".write-toggle")?.classList.toggle("on", showThinking);
 }
 
 async function openLearningHub() {

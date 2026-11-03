@@ -137,7 +137,7 @@ def _safe_args(raw_arguments: str) -> dict:
         return {}
 
 
-def _final_stream(messages: list[dict], timeout: float, require_vision: bool, should_stop):
+def _final_stream(messages: list[dict], timeout: float, require_vision: bool, should_stop, show_thinking: bool = False):
     """达到限制后，让模型用已有材料收尾。这里同样流式输出。"""
     messages = messages + [{
         "role": "user",
@@ -147,10 +147,12 @@ def _final_stream(messages: list[dict], timeout: float, require_vision: bool, sh
     try:
         for kind, payload in chat_completion_stream(
             messages, tools=None, timeout=timeout, should_stop=should_stop,
-            require_vision=require_vision,
+            require_vision=require_vision, enable_thinking=show_thinking,
         ):
             if kind == "token":
                 yield {"type": "token", "text": payload}
+            elif kind == "reasoning":
+                yield {"type": "reasoning", "text": payload}
             else:
                 reply = payload.get("content") or ""
     except ModelConfigError:
@@ -173,10 +175,13 @@ def run_agent_stream(
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
+    show_thinking: bool = False,
 ):
     """执行一次 Agent，边跑边产出事件。
 
-    事件类型：start / token / tool_start / tool_end / limit / error / done。
+    事件类型：start / round / reasoning / token / tool_start / tool_end / limit / error / done。
+    - round：每个模型轮次开始时发一次，前端用来标注「第 N 轮」
+    - reasoning：模型的思考过程（仅支持的服务商返回，内容不进入回答正文）
     done 事件带完整结果，调用方据此落库。
     """
     run_id = uuid.uuid4().hex
@@ -327,15 +332,23 @@ def run_agent_stream(
                 break
             messages = _fit_context(messages)
 
+            # 前端用它标出「第 N 轮」，让用户看到模型是在反复查证还是准备收尾
+            yield {"type": "round", "round": round_no, "max_rounds": MAX_ROUNDS}
+
             turn = None
+            reasoning_parts: list[str] = []
             llm_started = time.monotonic()
             try:
                 for kind, payload in chat_completion_stream(
                     messages, tools=schemas, timeout=min(30, remaining),
                     should_stop=should_stop, require_vision=require_vision,
+                    enable_thinking=show_thinking,
                 ):
                     if kind == "token":
                         yield {"type": "token", "text": payload}
+                    elif kind == "reasoning":
+                        reasoning_parts.append(payload)
+                        yield {"type": "reasoning", "text": payload}
                     else:
                         turn = payload
             except ModelConfigError as exc:
@@ -367,7 +380,12 @@ def run_agent_stream(
             total_tokens += int(turn.get("usage") or 0)
             if turn.get("content"):
                 visible_parts.append(turn["content"])
-            steps.append({"kind": "llm_call", "round_no": round_no, "elapsed_ms": int((time.monotonic() - llm_started) * 1000)})
+            steps.append({
+                "kind": "llm_call", "round_no": round_no,
+                "elapsed_ms": int((time.monotonic() - llm_started) * 1000),
+                # 只留一小段思考摘要用于回看历史；完整思考过程只在前端实时展示
+                "reasoning": ("".join(reasoning_parts))[:1200],
+            })
 
             if turn.get("cancelled"):
                 status = "cancelled"
@@ -454,7 +472,8 @@ def run_agent_stream(
 
         if not reply and status in {"timeout", "max_rounds", "token_limit"}:
             closing = yield from _final_stream(
-                messages, max(2, min(10, deadline - time.monotonic())), require_vision, should_stop
+                messages, max(2, min(10, deadline - time.monotonic())), require_vision,
+                should_stop, show_thinking,
             )
             reply = closing
             visible_parts.append(closing)
@@ -498,6 +517,7 @@ def run_agent(
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
+    show_thinking: bool = False,
 ) -> dict:
     """非流式包装：把事件流跑完，返回旧格式结果，旧接口与测试继续可用。"""
     final: dict = {}
@@ -511,6 +531,7 @@ def run_agent(
         allowed_tools=allowed_tools,
         allow_writes=allow_writes,
         allow_workspace=allow_workspace,
+        show_thinking=show_thinking,
     ):
         if event.get("type") == "done":
             final = {key: value for key, value in event.items() if key != "type"}

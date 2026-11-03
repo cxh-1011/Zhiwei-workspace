@@ -198,6 +198,8 @@ class Message(BaseModel):
     allow_writes: StrictBool = False
     # 是否允许助手只读访问工作区代码（list_dir / read_file / grep_code）。默认关闭。
     allow_workspace: StrictBool = False
+    # 是否请求模型的思考过程（仅部分服务商支持，例如 Qwen3 系列）。默认关闭。
+    show_thinking: StrictBool = False
 
 
 class PaperQuestion(BaseModel):
@@ -318,6 +320,7 @@ def chat(message: Message):
             memory_context=ctx["memory_context"],
             allow_writes=message.allow_writes,
             allow_workspace=message.allow_workspace,
+            show_thinking=message.show_thinking,
         )
         _persist_chat(message.chat_id, message.text, result)
         return result
@@ -351,6 +354,7 @@ def chat_stream(message: Message):
                 memory_context=ctx["memory_context"],
                 allow_writes=message.allow_writes,
                 allow_workspace=message.allow_workspace,
+                show_thinking=message.show_thinking,
             ):
                 if event.get("type") == "done":
                     result = event

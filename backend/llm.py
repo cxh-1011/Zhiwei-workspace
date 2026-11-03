@@ -94,6 +94,76 @@ def _supports_tools(model: str) -> bool:
     return not any(hint in lowered for hint in NO_TOOL_HINTS)
 
 
+# 这些模型默认不思考，需要显式打开（DashScope 的 enable_thinking）。
+# 推理类模型（reasoner / thinking）本来就一直在思考，不用多此一举，多传参数反而会被拒。
+THINKING_SWITCH_HINTS = ("qwen3",)
+
+
+def supports_thinking(model: str) -> bool:
+    lowered = (model or "").lower()
+    if any(hint in lowered for hint in NO_TOOL_HINTS):
+        return True  # 本来就是推理模型，思考内容会自动回来
+    return any(hint in lowered for hint in THINKING_SWITCH_HINTS)
+
+
+def _thinking_body(model: str) -> dict | None:
+    """需要显式开关才思考的模型，返回 extra_body；其余返回 None。"""
+    lowered = (model or "").lower()
+    if any(hint in lowered for hint in NO_TOOL_HINTS):
+        return None  # 已经在思考，不需要开关
+    if any(hint in lowered for hint in THINKING_SWITCH_HINTS):
+        return {"enable_thinking": True}
+    return None
+
+
+def _delta_field(delta, name: str):
+    """读取流式增量里的字段。部分服务商把 reasoning_content 放在 model_extra 里。"""
+    value = getattr(delta, name, None)
+    if value:
+        return value
+    extra = getattr(delta, "model_extra", None) or {}
+    return extra.get(name) or None
+
+
+# 只在这些报错上做「降级重试」，避免把 401 / 超时也重试一遍
+_PARAM_ERROR_HINTS = (
+    "stream_options", "extra_body", "enable_thinking",
+    "unsupported parameter", "unrecognized", "unknown parameter",
+    "invalid parameter", "extra fields not permitted",
+)
+
+
+def _is_param_error(exc: Exception) -> bool:
+    return any(hint in str(exc).lower() for hint in _PARAM_ERROR_HINTS)
+
+
+def _open_stream(client: OpenAI, kwargs: dict):
+    """建立流式连接。
+
+    不同兼容端点的实现差异很大：有的不认 stream_options，有的不认 enable_thinking。
+    这里按「功能从多到少」依次降级，只对参数类报错重试，鉴权/网络错误直接抛出。
+    """
+    variants = [
+        {**kwargs, "stream_options": {"include_usage": True}},
+        dict(kwargs),
+    ]
+    if "extra_body" in kwargs:
+        stripped = {key: value for key, value in kwargs.items() if key != "extra_body"}
+        variants.append({**stripped, "stream_options": {"include_usage": True}})
+        variants.append(stripped)
+
+    last_error: Exception | None = None
+    for index, variant in enumerate(variants):
+        try:
+            return client.chat.completions.create(**variant)
+        except Exception as exc:  # noqa: BLE001 - 需要按报错内容判断是否降级
+            last_error = exc
+            if not _is_param_error(exc) or index == len(variants) - 1:
+                raise
+            logger.info("端点拒绝了可选参数（%s），降级重试", type(exc).__name__)
+    raise last_error or RuntimeError("模型流式调用失败")
+
+
 def _base_kwargs(
     messages: list[dict],
     tools: list[dict] | None,
@@ -139,16 +209,19 @@ def chat_completion_stream(
     should_stop=None,
     provider_id: int | None = None,
     require_vision: bool = False,
+    enable_thinking: bool = False,
 ):
     """流式调用模型。
 
     逐段 yield ("token", 文本片段)，最后 yield 一次 ("message", payload)，其中
     payload = {"content", "tool_calls": [{"id","name","arguments"}], "usage", "cancelled",
-               "model", "provider"}。
+               "model", "provider", "reasoning"}。
 
     工具调用的参数是分片到达的，必须按 index 累加，不能只读某一帧。
     should_stop 返回 True 时立即关闭连接并返回已收到的内容（供「停止」按钮使用）。
     require_vision=True 时优先使用配了视觉模型的服务商（图片问答）。
+    enable_thinking=True 时请求模型的思考过程；支持的服务商会额外 yield ("reasoning", 片段)，
+    不支持的服务商只是不返回这些片段，不影响正常回答。
     """
 
     provider = resolve_provider(need_vision=require_vision, provider_id=provider_id)
@@ -159,16 +232,14 @@ def chat_completion_stream(
     client = _client_for(provider)
     kwargs = _base_kwargs(messages, tools, timeout, selected)
     kwargs["stream"] = True
+    thinking_body = _thinking_body(selected) if enable_thinking else None
+    if thinking_body:
+        kwargs["extra_body"] = thinking_body
 
-    try:
-        stream = client.chat.completions.create(
-            stream_options={"include_usage": True}, **kwargs
-        )
-    except Exception:
-        # 部分兼容端点不支持 stream_options，退回普通流式（此时 usage 可能为 0）。
-        stream = client.chat.completions.create(**kwargs)
+    stream = _open_stream(client, kwargs)
 
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     calls: dict[int, dict] = {}
     total_tokens = 0
     cancelled = False
@@ -189,6 +260,13 @@ def chat_completion_stream(
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
+
+            # 思考过程：Qwen3 / DeepSeek-R1 等会放在 reasoning_content 里。
+            # 它和正式回答是两条独立的流，不能混进 content，否则正文会被污染。
+            reasoning = _delta_field(delta, "reasoning_content") or _delta_field(delta, "reasoning")
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                yield ("reasoning", reasoning)
 
             text = getattr(delta, "content", None)
             if text:
@@ -215,6 +293,7 @@ def chat_completion_stream(
 
     yield ("message", {
         "content": "".join(content_parts),
+        "reasoning": "".join(reasoning_parts),
         "tool_calls": [calls[index] for index in sorted(calls)],
         "usage": total_tokens,
         "cancelled": cancelled,
