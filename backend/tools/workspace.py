@@ -13,89 +13,22 @@
 import os
 import re
 
+from ._guard import (
+    MAX_FILE_BYTES,
+    MAX_LINE_CHARS,
+    SKIP_SUFFIXES,
+    WORKSPACE_ROOT,
+    display as _display,
+    is_blocked as _is_blocked,
+    rel_inside as _rel_inside,
+    resolve as safe_path,
+)
 from .base import Tool, ToolResult, register
 
 
 # ---------------------------------------------------------------- 工作区与安全边界
-
-_DEFAULT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-)
-WORKSPACE_ROOT = os.path.realpath(os.getenv("AGENT_WORKSPACE") or _DEFAULT_ROOT)
-
-# 目录名命中即整棵子树不可见
-BLOCKED_DIRS = {
-    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
-    ".deliverables", "backups", "uploads", "logs", ".idea", ".vscode",
-}
-
-# 文件名前缀命中即不可读（.env / .env.example 都挡掉，宁严不漏）
-BLOCKED_PREFIXES = (".env",)
-
-# 后缀命中即不可读：数据库、密钥、证书
-BLOCKED_SUFFIXES = {
-    ".db", ".sqlite", ".sqlite3", ".key", ".pem", ".pfx", ".p12", ".keystore",
-}
-
-# 单文件读取上限
-MAX_FILE_BYTES = 512 * 1024
-MAX_LINE_CHARS = 400
-
-
-def _normcase(path: str) -> str:
-    return os.path.normcase(os.path.realpath(path))
-
-
-def _rel_inside(path: str) -> str:
-    """把绝对路径转成相对工作区的路径；越界直接抛错。
-
-    边界判断用 normcase（Windows 下大小写不敏感），但返回的路径保留原始大小写，
-    否则显示出来会变成 readme.md 这种小写形式。
-    """
-    root = WORKSPACE_ROOT
-    target = os.path.realpath(path)
-    root_key = os.path.normcase(root)
-    target_key = os.path.normcase(target)
-    if target_key != root_key and not target_key.startswith(root_key + os.sep):
-        raise ValueError("路径越界：只能访问工作区内的文件")
-    return os.path.relpath(target, root)
-
-
-def _is_blocked(rel_path: str) -> bool:
-    """判断相对路径是否命中黑名单。"""
-    parts = [p for p in rel_path.replace("\\", "/").split("/") if p and p != "."]
-    if not parts:
-        return False
-    for part in parts[:-1]:
-        if part.lower() in BLOCKED_DIRS:
-            return True
-    name = parts[-1]
-    low = name.lower()
-    if low in BLOCKED_DIRS:
-        return True
-    if low.startswith(BLOCKED_PREFIXES):
-        return True
-    return os.path.splitext(low)[1] in BLOCKED_SUFFIXES
-
-
-def safe_path(rel: str) -> str:
-    """把用户/模型给的相对路径解析成安全的绝对路径。"""
-    rel = str(rel or ".").strip().replace("\\", "/")
-    if rel in ("", "."):
-        rel = "."
-    # 绝对路径一律拒绝：只接受工作区相对路径
-    if os.path.isabs(rel) or re.match(r"^[A-Za-z]:", rel):
-        raise ValueError("请使用相对工作区的路径，不要用绝对路径")
-    resolved = os.path.realpath(os.path.join(WORKSPACE_ROOT, rel))
-    inside = _rel_inside(resolved)
-    if _is_blocked(inside):
-        raise ValueError("该路径属于不可访问范围（配置/数据/依赖目录）")
-    return resolved
-
-
-def _display(rel: str) -> str:
-    return rel.replace("\\", "/")
-
+# 所有路径判断都集中在 _guard.py：只读、写入、执行三类工具共用同一套规则，
+# 避免出现「读被拦了、写没拦」。这里仅保留别名，别的模块仍按老名字调用。
 
 # ---------------------------------------------------------------- list_dir
 
@@ -204,10 +137,7 @@ def _read_file(args: dict, _context: dict) -> ToolResult:
 
 # ---------------------------------------------------------------- grep_code
 
-_SKIP_EXT = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz",
-    ".exe", ".dll", ".pyc", ".faiss", ".pkl", ".woff", ".woff2", ".ttf",
-}
+_SKIP_EXT = SKIP_SUFFIXES
 
 
 def _grep(args: dict, _context: dict) -> ToolResult:
