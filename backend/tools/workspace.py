@@ -16,10 +16,15 @@ import re
 from ._guard import (
     MAX_FILE_BYTES,
     MAX_LINE_CHARS,
+    MAX_SCAN_BYTES,
     SKIP_SUFFIXES,
     WORKSPACE_ROOT,
     display as _display,
+    human_size as _human,
     is_blocked as _is_blocked,
+    looks_binary as _looks_binary,
+    needs_probe as _needs_probe,
+    reject_non_text as _reject_non_text,
     rel_inside as _rel_inside,
     resolve as safe_path,
 )
@@ -42,7 +47,7 @@ def _list_dir(args: dict, _context: dict) -> ToolResult:
     if not os.path.isdir(target):
         return ToolResult(False, "", error="不是目录：%s" % rel)
 
-    lines, dirs, files = [], 0, 0
+    lines, dirs, files, hidden = [], 0, 0, 0
     try:
         entries = sorted(os.scandir(target), key=lambda e: (not e.is_dir(), e.name.lower()))
     except OSError as exc:
@@ -55,8 +60,10 @@ def _list_dir(args: dict, _context: dict) -> ToolResult:
         try:
             entry_rel = _rel_inside(entry.path)
         except ValueError:
+            hidden += 1          # 符号链接指到工作区外，一样算不可访问
             continue
         if _is_blocked(entry_rel):
+            hidden += 1
             continue
         if entry.is_dir():
             dirs += 1
@@ -70,12 +77,16 @@ def _list_dir(args: dict, _context: dict) -> ToolResult:
             lines.append("%s  (%d B)" % (entry.name, size))
 
     if not lines:
-        return ToolResult(True, "目录 %s 是空的（或内容都在不可访问范围内）。" % rel,
-                          {"path": rel, "entries": []})
+        return ToolResult(True, "目录 %s 里没有可访问的内容（隐藏 %d 项）。" % (rel, hidden),
+                          {"path": rel, "entries": [], "hidden": hidden})
 
     header = "工作区相对路径 %s/  （%d 个目录，%d 个文件）" % (_display(_rel_inside(target)), dirs, files)
-    return ToolResult(True, header + "\n" + "\n".join(lines),
-                      {"path": rel, "dirs": dirs, "files": files})
+    body = "\n".join(lines)
+    if hidden:
+        # 只说数量不说名字：让模型知道目录不是空的，又不暴露 .env 这类文件名
+        body += "\n（另有 %d 项在不可访问范围内，已隐藏）" % hidden
+    return ToolResult(True, header + "\n" + body,
+                      {"path": rel, "dirs": dirs, "files": files, "hidden": hidden})
 
 
 # ---------------------------------------------------------------- read_file
@@ -92,6 +103,11 @@ def _read_file(args: dict, _context: dict) -> ToolResult:
     if not os.path.isfile(target):
         return ToolResult(False, "", error="文件不存在：%s" % rel)
 
+    # 先判类型再判体积：对一张 3 MB 的图片应该报「这是二进制」，而不是「文件太大」
+    denied = _reject_non_text(target)
+    if denied:
+        return ToolResult(False, "", error="%s：%s" % (_display(_rel_inside(target)), denied))
+
     try:
         size = os.path.getsize(target)
     except OSError as exc:
@@ -99,8 +115,9 @@ def _read_file(args: dict, _context: dict) -> ToolResult:
     if size > MAX_FILE_BYTES:
         return ToolResult(
             False, "",
-            error="文件过大（%d KB），超过 %d KB 上限。请改用 grep_code 定位后分段阅读"
-                  % (size // 1024, MAX_FILE_BYTES // 1024),
+            error=("文件过大（%s），超过单文件 %s 上限。请用 grep_code 定位目标行，"
+                   "再用 read_file(start_line=, max_lines=) 分段读；不要试图一次读完。"
+                   % (_human(size), _human(MAX_FILE_BYTES))),
         )
 
     try:
@@ -169,7 +186,10 @@ def _grep(args: dict, _context: dict) -> ToolResult:
         if ext in _SKIP_EXT:
             return
         try:
-            if os.path.getsize(path) > MAX_FILE_BYTES:
+            if os.path.getsize(path) > MAX_SCAN_BYTES:
+                return
+            # 未知后缀再嗅探一次：避免把 .bin、无后缀的二进制逐行当文本读
+            if _needs_probe(path) and _looks_binary(path):
                 return
             with open(path, "r", encoding="utf-8", errors="ignore") as handle:
                 scanned += 1
@@ -239,8 +259,8 @@ register(Tool(
     name="read_file",
     description=(
         "读取工作区内某个文本文件的内容，返回带行号的代码。"
-        "文件较长时间可分页读取。只读，不能修改文件。"
-        "配置、数据库、密钥、依赖目录不可访问。"
+        "文件较长时间用 start_line / max_lines 分页读取。只读，不能修改文件。"
+        "配置、密钥、数据库、依赖与备份目录，以及二进制文件一律不可访问。"
     ),
     parameters={
         "type": "object",
@@ -261,7 +281,7 @@ register(Tool(
     description=(
         "在工作区文件中用正则搜索代码，返回「文件:行号: 内容」。"
         "用于定位某个函数、变量或字符串出现在哪里，比逐个读文件高效。"
-        "只读。自动跳过依赖目录、二进制文件和数据文件。"
+        "只读。自动跳过红线目录、二进制文件、超过 512 KB 的大文件与数据文件。"
     ),
     parameters={
         "type": "object",

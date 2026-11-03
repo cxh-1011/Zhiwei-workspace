@@ -14,7 +14,7 @@ import re
 import subprocess
 
 from ._guard import (
-    MAX_FILE_BYTES,
+    MAX_SCAN_BYTES,
     SKIP_SUFFIXES,
     WORKSPACE_ROOT,
     display,
@@ -312,7 +312,8 @@ def _repo_map(args: dict, _context: dict) -> ToolResult:
             skipped += 1
             continue
         try:
-            if os.path.getsize(full) > MAX_FILE_BYTES:
+            # 扫描上限而不是读取上限：一个巨大的数据文件不该拖住整张仓库地图
+            if os.path.getsize(full) > MAX_SCAN_BYTES:
                 skipped += 1
                 continue
             with open(full, "r", encoding="utf-8", errors="ignore") as handle:

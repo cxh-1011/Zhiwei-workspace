@@ -214,8 +214,19 @@ def _write_file(args: dict, context: dict) -> ToolResult:
 
     rel = _guard.display(_guard.rel_inside(target))
     existed = os.path.isfile(target)
+
+    if not existed:
+        # 新建时只能写文本：.png / .exe 这类后缀不该由 write_file 产生，
+        # 模型想「贴一段 base64 造图片」会得到一张坏文件，不如直接拒绝。
+        ext = os.path.splitext(target)[1].lower()
+        if ext in _guard.SKIP_SUFFIXES:
+            return ToolResult(False, "", error="write_file 只能写文本，不能生成 %s 文件" % ext)
+
     old_text = ""
     if existed:
+        denied = _guard.reject_non_text(target)
+        if denied:
+            return ToolResult(False, "", error="%s：%s，拒绝整体重写" % (rel, denied))
         try:
             if os.path.getsize(target) > _guard.MAX_FILE_BYTES:
                 return ToolResult(False, "", error="目标文件过大（超过 %d KB），请改用 edit_file 局部修改"
@@ -278,10 +289,15 @@ def _edit_file(args: dict, context: dict) -> ToolResult:
         return ToolResult(False, "", error="文件不存在：%s。新建文件请用 write_file" % rel)
     rel = _guard.display(_guard.rel_inside(target))
 
+    denied = _guard.reject_non_text(target)
+    if denied:
+        return ToolResult(False, "", error="%s：%s，无法按锚点编辑" % (rel, denied))
+
     try:
         if os.path.getsize(target) > _guard.MAX_FILE_BYTES:
-            return ToolResult(False, "", error="目标文件过大（超过 %d KB），无法安全编辑"
-                              % _kb(_guard.MAX_FILE_BYTES))
+            return ToolResult(False, "", error="目标文件过大（%s），超过 %s，无法整体读入后替换"
+                              % (_guard.human_size(os.path.getsize(target)),
+                                 _guard.human_size(_guard.MAX_FILE_BYTES)))
         old_text = _read_text(target)
     except UnicodeDecodeError:
         return ToolResult(False, "", error="目标不是 UTF-8 文本文件，拒绝修改")
