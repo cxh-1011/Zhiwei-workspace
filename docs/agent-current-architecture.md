@@ -12,11 +12,45 @@
 - 默认每次最多 5 轮、每轮 3 个工具、60 秒、12,000 tokens；环境变量可以调节，代码另有硬上限。
 - 聊天历史保留最近 12 条供短期上下文使用。论文检索仍使用当前 FAISS 论文索引；重新上传论文会替换当前索引。
 
+## 流式输出与中断
+
+对话默认走 `POST /chat/stream`，返回 `text/event-stream`。`run_agent_stream()` 是一个生成器，边跑边产出事件，`run_agent()` 只是把它跑完并返回旧格式结果的包装，所以 `/chat`、`/paper_chat`、`/chat_file` 这些老接口行为不变。
+
+| 事件 | 含义 | 前端处理 |
+| --- | --- | --- |
+| `start` | 运行开始，带 `run_id` | 记下 `run_id` 供停止按钮使用 |
+| `round` | 新一轮模型调用开始，带 `round` / `max_rounds` | 过程面板插入「第 N 轮」分隔行 |
+| `reasoning` | 模型的思考片段（与正文分开） | 写进过程面板的「模型思考」块，纯文本追加 |
+| `token` | 模型输出的文本片段 | 追加到回答区（纯文本，用 rAF 合并重绘） |
+| `tool_start` | 即将调用工具，带工具名与参数 | 过程面板插入工具条目，状态为执行中 |
+| `tool_end` | 工具返回，带 `ok` / 耗时 / 结果摘要 | 条目打勾并显示耗时与结果摘要 |
+| `limit` | 触发某个预算上限或用户停止 | 面板标题显示具体原因 |
+| `error` | 模型调用或执行异常 | 面板内插入红色错误条目 |
+| `done` | 运行结束，带 `reply`、`steps`、`status`、`total_tokens` | 用 Markdown 重绘回答，过程面板就地换成完整时间线 |
+
+几个实现要点：
+
+- **工具调用参数是分片到达的**，`chat_completion_stream()` 按 `index` 累加 `arguments`，不能只读某一帧。
+- **思考内容单独走一条流**。`reasoning_content` 会被单独 yield 成 `reasoning` 事件，绝不混进 `content`，否则正文会掺进模型的自我对话。`show_thinking=true` 时才会请求：Qwen3 系列通过 `extra_body.enable_thinking` 打开，推理类模型（reasoner / thinking）本来就会返回，无需开关。
+- **可选参数一律可降级**。`_open_stream()` 按「带 stream_options 和 extra_body → 只带其一 → 都去掉」依次尝试，只对参数类报错重试，鉴权或网络错误直接抛出，不会把 401 也重试四遍。
+- **落库放在流的末尾**。`/chat/stream` 把 `_persist_chat()` 放在生成器的 `finally` 里，前端中途断开也不会丢记录。
+- **中断是协作式的**。`/chat/cancel/{run_id}` 只在内存字典 `_CANCEL` 里记一笔，Agent 在「每轮开始前」「每次工具调用前」以及「每个流式分片到达时」检查，因此停止会立刻生效；超过 5 分钟的标记自动清理。状态记为 `cancelled`，已生成的半截回答会保留并写入记录。
+- **Nginx 必须关掉缓冲**（`proxy_buffering off`），否则逐字输出会被攒成一次性返回。响应头里的 `X-Accel-Buffering: no` 是第二道保险。
+
+离线测试（不需要 API Key，用假模型替换 `agent.chat_completion_stream`）：
+
+```bash
+cd backend
+..\.venv\Scripts\python.exe test_streaming.py    # 事件顺序、工具调用、非法参数、取消
+..\.venv\Scripts\python.exe test_stream_sse.py   # 401、SSE 帧、消息与运行记录落库
+..\.venv\Scripts\python.exe test_thinking.py     # 思考事件、轮次事件、参数降级重试
+```
+
 ## 运行记录
 
 - `agent_runs` 保存一次执行的状态、用时和回答。
-- `agent_steps` 保存模型轮次、工具名称、参数、结果摘要和成功状态。
-- `GET /agent_runs?chat_id=...` 返回会话运行记录，历史聊天打开后也会显示对应工具过程。
+- `agent_steps` 保存模型轮次、工具名称、参数、结果摘要、思考摘要（`reasoning`）和成功状态。
+- `GET /agent_runs?chat_id=...` 返回会话运行记录，历史聊天打开后也会显示对应工具过程与思考摘要。
 
 ## 长期记忆与学习计划
 
@@ -35,6 +69,20 @@
 | `remember` | 写入一条长期记忆 | 内容相同的不重复写入；上限 1200 字符；来源记为 `agent` |
 | `list_learning_tasks` | 列出计划与任务编号、完成状态 | 只读，供勾选前取 `plan_id` / `task_id` |
 | `set_task_status` | 把任务标记为 `done` / `todo` | `plan_id` 与 `task_id` 必须匹配，否则返回失败并提示先查列表 |
+
+## 工作区只读工具
+
+`allow_workspace` 默认为 `false`，此时 `list_dir`、`read_file`、`grep_code` **不会注册**，模型看不到它们。用户在前端勾选「允许读代码」后才注册。
+
+这三个工具只读：不能写文件、不能执行命令。安全边界有三层：
+
+| 边界 | 实现 | 作用 |
+| --- | --- | --- |
+| 路径限制 | 所有路径经 `realpath` 解析后必须落在 `AGENT_WORKSPACE` 之下 | 挡住 `..` 穿越、绝对路径、符号链接逃逸 |
+| 文件黑名单 | 目录 `.git` / `.venv` / `__pycache__` / `uploads` / `backups` 等；文件名前缀 `.env`；后缀 `.db` / `.key` / `.pem` 等 | 防止把 API Key、数据库、依赖读进模型上下文 |
+| 读取上限 | 单文件 512 KB、单次 400 行、单行 400 字符、grep 最多 100 条 | 防止一次读爆上下文 |
+
+`AGENT_WORKSPACE` 留空时默认使用项目根目录。回归测试见 `backend/test_workspace_tools.py`。
 
 ## 部署
 
