@@ -92,13 +92,20 @@ cd backend
 | 边界 | 实现 | 作用 |
 | --- | --- | --- |
 | 路径限制 | 所有路径经 `realpath` 解析后必须落在 `AGENT_WORKSPACE` 之下 | 挡住 `..` 穿越、绝对路径、符号链接逃逸 |
-| 文件黑名单 | 目录 `.git` / `.venv` / `__pycache__` / `uploads` / `backups` 等；文件名前缀 `.env`；后缀 `.db` / `.key` / `.pem` 等 | 防止把 API Key、数据库、依赖读进模型上下文 |
-| 读取上限 | 单文件 512 KB、单次 400 行、单行 400 字符、grep 最多 100 条 | 防止一次读爆上下文 |
+| 红线（目录） | `.git` / `.venv` / `venv` / `env` / `node_modules` / `__pycache__` / `uploads` / `backups` / `logs` / `.ssh` / `.aws` / `.gnupg` / `.workbuddy` / `.idea` / `.vscode`，命中即整棵子树不可见 | 防止把 API Key、数据库、依赖、备份读进模型上下文 |
+| 红线（文件名与后缀） | 前缀 `.env`（含 `.env.example`）；精确名 `.npmrc` / `.pypirc` / `.netrc` / `credentials*` / `secrets.*` / `id_rsa` 等；后缀 `.db` / `.sqlite` / `.key` / `.pem` / `.p12` / `.kdbx` 等，先剥掉 SQLite 的 `-wal` / `-shm` / `-journal` 尾巴再判断 | 同上。附属文件是最容易漏判的一处：`chats.db-wal` 的后缀是 `.db-wal` 而不是 `.db` |
+| 拒绝话术 | `block_reason()` 返回中文类别，`resolve()` 拼进报错并明说「换个路径写法也不会通过」 | 模型不会反复试探 `.env.bak`、`config/.env`，省轮次 |
+| 二进制 | 读前 8 KB 嗅探 NUL 字节与 UTF-8 失败比例；已知文本后缀跳过探针；探针截断处「去掉尾部 4 字节」重判一次 | 不把乱码塞进上下文，中文文件不被误判 |
+| 体积 | 单文件读取 2 MB、单次 400 行、单行 400 字符；grep 与仓库地图对超过 512 KB 的文件直接跳过；grep 最多 100 条 | 防止一个日志拖垮整个扫描 |
 | git 调用 | `subprocess` 直接调用（不经 shell）、15 秒超时、输出截断 6000 字符、`core.quotepath=false` | 防命令注入、防卡死、中文文件名不转义 |
 
 `repo_map` 的预算是**广度优先**：先保证每个文件都被列出，再按剩余空间分配符号数量（12 → 8 → 6 → 4 → 2 → 1 → 0 逐档退让）。反过来先给符号会在仓库稍大时让整个 `frontend/` 消失，而「有哪些文件」才是地图的主要用途；具体符号可以用 `grep_code` 补。公开符号（不带下划线）排在同文件私有符号之前，避免 `_helper` 把入口函数挤掉。
 
-`AGENT_WORKSPACE` 留空时默认使用项目根目录。回归测试见 `backend/test_workspace_tools.py`（38 项）与 `backend/test_repo_tools.py`（55 项）。
+红线**只判路径，不猜内容**：`README.md` 里写着 `SECRET_KEY=...` 的示例照样可读。按内容过滤会同时误伤文档、又漏掉真正的密钥，把规则钉在路径上更可靠。
+
+同一份清单也写进了提示词（「允许改代码」时第 ⑦–⑨ 条）。模型不必先撞墙才知道边界，工具层再硬拦一次，两层互为兜底。
+
+`AGENT_WORKSPACE` 留空时默认使用项目根目录。回归测试见 `backend/test_workspace_tools.py`（38 项）、`backend/test_repo_tools.py`（55 项）与 `backend/test_redlines.py`（70 项）。
 
 ## 代码修改与撤销
 
