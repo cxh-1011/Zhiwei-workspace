@@ -105,17 +105,14 @@ import agent  # noqa: E402
 captured = []
 
 
-class FakeMsg:
-    content = "ok"
-    tool_calls = None
-
-
-def fake_cc(messages, tools=None, timeout=None, model=None):
+def fake_cc_stream(messages, tools=None, timeout=None, model=None, should_stop=None, **kwargs):
+    """Agent 已改为流式接口，这里桩的也必须是生成器：先记下本轮拿到的工具清单，
+    再给一个不带 tool_calls 的终局消息，让循环一轮结束。"""
     captured.append({t["function"]["name"] for t in (tools or [])})
-    return FakeMsg(), None
+    yield ("message", {"content": "ok", "tool_calls": [], "usage": 1, "cancelled": False})
 
 
-agent.chat_completion = fake_cc
+agent.chat_completion_stream = fake_cc_stream
 agent.run_agent("你好", mode="chat", allow_workspace=False)
 check("关闭时无 read_file", "read_file" not in captured[-1])
 agent.run_agent("你好", mode="chat", allow_workspace=True)
