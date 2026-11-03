@@ -6,7 +6,7 @@
 - 千问通过 DashScope OpenAI 兼容接口 Function Calling 选择工具。
 - 工具都在 `backend/tools/` 注册：`web_search`、`scholarly_search`、`paper_search`、`search_uploaded_files`、`list_uploaded_files`。
 - `scholarly_search` 实时查询 Semantic Scholar 与 Crossref 的学术元数据，返回题名、作者、年份、摘要、DOI 和可用的开放获取链接。它不登录或抓取知网、IEEE Xplore、ScienceDirect，也不绕过付费全文权限。可选配置 `SEMANTIC_SCHOLAR_API_KEY` 提高 Semantic Scholar API 使用能力，`CROSSREF_MAILTO` 用于 Crossref polite pool。
-- 工具只做搜索、检索和「学习档案写入」，没有任意 Python、Shell 或任意文件写入工具。
+- 工具只做搜索、检索、只读的代码与 git 查看，以及「学习档案写入」，没有任意 Python、Shell 或任意文件写入工具。
 - 工具结果会回给千问；它可以继续调用工具，或生成最终回答。
 - 文件问答支持 TXT、PDF、DOCX，以及 JPG、JPEG、PNG、WEBP 图片。图片（最大 10 MB）作为 Base64 视觉输入发送给配置的 `AGENT_VISION_MODEL`，默认 `qwen3-vl-plus`；图像问答不走文本切片检索。
 - 默认每次最多 5 轮、每轮 3 个工具、60 秒、12,000 tokens；环境变量可以调节，代码另有硬上限。
@@ -72,17 +72,32 @@ cd backend
 
 ## 工作区只读工具
 
-`allow_workspace` 默认为 `false`，此时 `list_dir`、`read_file`、`grep_code` **不会注册**，模型看不到它们。用户在前端勾选「允许读代码」后才注册。
+`allow_workspace` 默认为 `false`，此时下面这一组工具**不会注册**，模型看不到它们。用户在前端勾选「允许读代码」后才注册。
 
-这三个工具只读：不能写文件、不能执行命令。安全边界有三层：
+| 工具 | 用途 | 典型调用时机 |
+| --- | --- | --- |
+| `repo_map` | 目录结构 + 每个源码文件的行数与顶层函数/类名 | 面对不熟悉的仓库，第一步 |
+| `list_dir` | 单层目录列表 | 确认某个目录里有什么 |
+| `read_file` | 带行号的分页读取（`start_line` / `max_lines`） | 已经定位到具体文件之后 |
+| `grep_code` | 正则搜索，返回「文件:行号: 内容」 | 找一个函数或常量的位置 |
+| `git_status` | 分支、HEAD、未提交条目 | 动手前确认工作区是否干净 |
+| `git_diff` | 未提交差异（含 `--stat` 与未跟踪文件清单） | 确认「刚才那步改了什么」 |
+| `git_log` | 最近提交（oneline + 标签） | 了解某个文件的演变 |
+
+七个工具全部只读：不能写文件、不能执行命令。路径判断统一走 `backend/tools/_guard.py`，读写执行三类工具共用同一套规则（写入类工具在第 2 阶段接入时直接复用 `resolve(rel, write=True)`）。
+
+安全边界：
 
 | 边界 | 实现 | 作用 |
 | --- | --- | --- |
 | 路径限制 | 所有路径经 `realpath` 解析后必须落在 `AGENT_WORKSPACE` 之下 | 挡住 `..` 穿越、绝对路径、符号链接逃逸 |
 | 文件黑名单 | 目录 `.git` / `.venv` / `__pycache__` / `uploads` / `backups` 等；文件名前缀 `.env`；后缀 `.db` / `.key` / `.pem` 等 | 防止把 API Key、数据库、依赖读进模型上下文 |
 | 读取上限 | 单文件 512 KB、单次 400 行、单行 400 字符、grep 最多 100 条 | 防止一次读爆上下文 |
+| git 调用 | `subprocess` 直接调用（不经 shell）、15 秒超时、输出截断 6000 字符、`core.quotepath=false` | 防命令注入、防卡死、中文文件名不转义 |
 
-`AGENT_WORKSPACE` 留空时默认使用项目根目录。回归测试见 `backend/test_workspace_tools.py`。
+`repo_map` 的预算是**广度优先**：先保证每个文件都被列出，再按剩余空间分配符号数量（12 → 8 → 6 → 4 → 2 → 1 → 0 逐档退让）。反过来先给符号会在仓库稍大时让整个 `frontend/` 消失，而「有哪些文件」才是地图的主要用途；具体符号可以用 `grep_code` 补。公开符号（不带下划线）排在同文件私有符号之前，避免 `_helper` 把入口函数挤掉。
+
+`AGENT_WORKSPACE` 留空时默认使用项目根目录。回归测试见 `backend/test_workspace_tools.py`（38 项）与 `backend/test_repo_tools.py`（55 项）。
 
 ## 部署
 

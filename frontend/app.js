@@ -850,7 +850,11 @@ const TOOL_LABELS = {
     set_task_status: "更新任务状态",
     list_dir: "查看目录",
     read_file: "读取文件",
-    grep_code: "搜索代码"
+    grep_code: "搜索代码",
+    repo_map: "查看仓库结构",
+    git_status: "查看改动状态",
+    git_diff: "查看代码差异",
+    git_log: "查看提交历史"
 };
 
 function toolLabel(name) {
@@ -875,7 +879,13 @@ const ARG_LABELS = {
     status: "状态",
     url: "地址",
     doi: "DOI",
-    title: "标题"
+    title: "标题",
+    staged: "看暂存区",
+    stat_only: "只看统计",
+    start_line: "起始行",
+    max_lines: "读取行数",
+    max_chars: "输出上限",
+    limit: "条数"
 };
 
 function formatArgValue(value) {

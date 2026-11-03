@@ -205,10 +205,14 @@ def run_agent_stream(
         ]
 
     # 工作区只读工具同样默认不注册：只有用户开启「允许读项目文件」才可见。
-    # 这三个工具只读，不能改文件、不能执行命令。
+    # 这一组全是只读的：看结构、读文件、搜代码、看 git 状态与历史。
+    # 不能改文件，也不能执行命令。
     if allow_workspace:
         tool_names = list(tool_names) + [
-            name for name in ("list_dir", "read_file", "grep_code")
+            name for name in (
+                "repo_map", "list_dir", "read_file", "grep_code",
+                "git_status", "git_diff", "git_log",
+            )
             if name not in tool_names
         ]
 
@@ -233,11 +237,15 @@ def run_agent_stream(
         )
     if allow_workspace:
         prompt += (
-            "\n\n用户已开启「允许读项目文件」。你有 list_dir、read_file、grep_code 三个只读工具，只能看，不能改也不能执行命令。"
-            "使用方式：① 先 list_dir 看结构，或 grep_code 定位符号，再 read_file 读具体文件，不要一上来就整仓扫读；"
-            "② 单个文件较长时分页读，先读到关键部分即可；"
-            "③ 引用代码时必须写清「文件路径:行号」，没读到的内容不要编造；"
-            "④ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
+            "\n\n用户已开启「允许读项目文件」。你有七个只读工具：repo_map、list_dir、read_file、"
+            "grep_code、git_status、git_diff、git_log。只能看，不能改文件，也不能执行命令。"
+            "使用方式："
+            "① 面对不熟悉的仓库，第一步调用 repo_map 拿整体结构与顶层符号，不要一上来就整仓扫读；"
+            "② 用 grep_code 定位具体实现，再用 read_file(start_line=, max_lines=) 分段精读该处；"
+            "③ 动手讨论改动前，先 git_status 看清有没有未提交的改动，用 git_diff 看具体改了什么，"
+            "避免把用户自己的修改当成待修复的问题；"
+            "④ 引用代码必须写清「文件路径:行号」，没读到的内容不要编造；"
+            "⑤ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
         )
 
     messages = [{"role": "system", "content": prompt}]

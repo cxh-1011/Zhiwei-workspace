@@ -7,5 +7,6 @@ from . import academic_search as _academic_search  # noqa: F401
 from . import web_search as _web_search  # noqa: F401
 from . import archive as _archive  # noqa: F401
 from . import workspace as _workspace  # noqa: F401
+from . import repo as _repo  # noqa: F401
 
 __all__ = ["Tool", "ToolResult", "register", "get_tool", "all_schemas", "tool_names"]
