@@ -1,13 +1,13 @@
 import json
 import logging
+import mimetypes
 import os
 import re
 import time
 import uuid
 import base64
-import mimetypes
 
-from llm import MODEL, VISION_MODEL, chat_completion
+from llm import VISION_MODEL, chat_completion_stream
 from tools import all_schemas, get_tool
 import tools as registered_tools  # noqa: F401
 
@@ -18,6 +18,11 @@ TOTAL_TIMEOUT = max(15.0, min(float(os.getenv("AGENT_TOTAL_TIMEOUT", "60")), 180
 MAX_CONTEXT_CHARS = max(8000, min(int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "24000")), 60000))
 MAX_TOOL_OUTPUT_CHARS = 6000
 MAX_TOKENS_PER_RUN = max(2000, min(int(os.getenv("AGENT_MAX_TOKENS_PER_RUN", "12000")), 40000))
+
+# 取消标记：前端点「停止」后记录一笔，循环在每个轮次边界和每个工具调用前检查。
+# 用内存字典而不是数据库，因为它的生命周期只有一次请求；超过窗口的条目自动清理。
+_CANCEL: dict[str, float] = {}
+_CANCEL_TTL = 300.0
 
 SYSTEM_PROMPT = """你是一个严谨、友好的中文科研学习助手，可以调用提供的工具。
 1. 对近期事实或明确要求联网核实的问题，调用网页搜索；用户寻找论文、文献综述或学术证据时，调用 scholarly_search；普通常识问题直接回答。
@@ -35,20 +40,28 @@ SYSTEM_PROMPT = """你是一个严谨、友好的中文科研学习助手，可�
 每首歌各用一个 MUSIC_CARD 区块；字段名和值必须在同一行。"""
 
 
-def _plain_message(message) -> dict:
-    content = getattr(message, "content", None) or ""
-    calls = getattr(message, "tool_calls", None) or []
-    serialized = []
-    for call in calls:
-        serialized.append({
-            "id": call.id,
-            "type": "function",
-            "function": {"name": call.function.name, "arguments": call.function.arguments or "{}"},
-        })
-    item = {"role": "assistant", "content": content}
-    if serialized:
-        item["tool_calls"] = serialized
-    return item
+def request_cancel(run_id: str) -> bool:
+    """记录一次取消请求。"""
+    now = time.time()
+    for key, stamp in list(_CANCEL.items()):
+        if now - stamp > _CANCEL_TTL:
+            _CANCEL.pop(key, None)
+    _CANCEL[run_id] = now
+    return True
+
+
+def is_cancelled(run_id: str) -> bool:
+    stamp = _CANCEL.get(run_id)
+    if stamp is None:
+        return False
+    if time.time() - stamp > _CANCEL_TTL:
+        _CANCEL.pop(run_id, None)
+        return False
+    return True
+
+
+def clear_cancel(run_id: str) -> None:
+    _CANCEL.pop(run_id, None)
 
 
 def _estimate_chars(messages: list[dict]) -> int:
@@ -98,20 +111,54 @@ def _fit_context(messages: list[dict]) -> list[dict]:
     return system + [item for group in kept_groups for item in group]
 
 
-def _final_without_tools(messages: list[dict], timeout: float, model: str | None = None) -> str:
+def _assistant_message(content: str, calls: list[dict]) -> dict:
+    item: dict = {"role": "assistant", "content": content or ""}
+    if calls:
+        item["tool_calls"] = [
+            {
+                "id": call.get("id") or f"call_{index}",
+                "type": "function",
+                "function": {
+                    "name": call.get("name", ""),
+                    "arguments": call.get("arguments") or "{}",
+                },
+            }
+            for index, call in enumerate(calls)
+        ]
+    return item
+
+
+def _safe_args(raw_arguments: str) -> dict:
+    """给前端展示用的参数预览，解析失败就返回空对象，不影响主流程。"""
+    try:
+        parsed = json.loads(raw_arguments)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _final_stream(messages: list[dict], timeout: float, model: str | None, should_stop):
+    """达到限制后，让模型用已有材料收尾。这里同样流式输出。"""
     messages = messages + [{
         "role": "user",
         "content": "请基于已经获得的信息立即给出最终回答。不要再请求调用工具；不确定之处请说明。",
     }]
+    reply = ""
     try:
-        message, _ = chat_completion(messages, tools=None, timeout=timeout, model=model)
-        return getattr(message, "content", None) or "我暂时无法整理出可靠答案，请缩小问题范围后再试。"
+        for kind, payload in chat_completion_stream(
+            messages, tools=None, timeout=timeout, model=model, should_stop=should_stop
+        ):
+            if kind == "token":
+                yield {"type": "token", "text": payload}
+            else:
+                reply = payload.get("content") or ""
     except Exception:
         logger.exception("Agent 达到限制后生成收尾回答失败")
-        return "本次任务达到工具调用限制，未能生成完整回答。请缩小问题范围后重试。"
+        reply = ""
+    return reply or "本次任务达到工具调用限制，未能生成完整回答。请缩小问题范围后重试。"
 
 
-def run_agent(
+def run_agent_stream(
     question: str,
     history: list[dict] | None = None,
     mode: str = "chat",
@@ -121,7 +168,12 @@ def run_agent(
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
-) -> dict:
+):
+    """执行一次 Agent，边跑边产出事件。
+
+    事件类型：start / token / tool_start / tool_end / limit / error / done。
+    done 事件带完整结果，调用方据此落库。
+    """
     run_id = uuid.uuid4().hex
     started = time.monotonic()
     deadline = started + TOTAL_TIMEOUT
@@ -177,6 +229,7 @@ def run_agent(
             "③ 引用代码时必须写清「文件路径:行号」，没读到的内容不要编造；"
             "④ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
         )
+
     messages = [{"role": "system", "content": prompt}]
     messages.extend(history or [])
     user_content = question[:12000]
@@ -189,136 +242,221 @@ def run_agent(
             {"type": "text", "text": question[:12000]},
         ]
     messages.append({"role": "user", "content": user_content})
+
     selected_model = VISION_MODEL if image_path else None
     schemas = all_schemas(tool_names)
     rounds = 0
     total_tokens = 0
     status = "ok"
     reply = ""
+    # 用户在页面上看到的所有文字（含工具调用前的过渡语句）。
+    # 落库和 done 都用它拼出的完整文本，避免「刷新后回答变短」。
+    visible_parts: list[str] = []
     seen_calls: set[str] = set()
+    should_stop = lambda: is_cancelled(run_id)  # noqa: E731
 
-    # Paper mode is specifically for discussing the locally parsed PDF. Do not
-    # rely on the model to infer that context from phrases like "summarize it";
-    # perform the local retrieval first, then let Qwen synthesize the evidence.
-    if mode == "paper" and not re.search(
-        r"(?:找|搜索|检索|推荐|查找)(?:一些|几篇|相关)?(?:新)?(?:论文|文献)|最近.{0,8}(?:论文|文献)",
-        question,
-        re.IGNORECASE,
-    ):
-        paper_tool = get_tool("paper_search")
-        if paper_tool is not None and "paper_search" in tool_names:
-            arguments = {"query": question[:1000], "k": 4}
-            call_started = time.monotonic()
-            result = paper_tool.invoke(arguments, context)
-            result_content = result.as_tool_message()[:MAX_TOOL_OUTPUT_CHARS]
-            signature = "paper_search:" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-            seen_calls.add(signature)
-            messages.append({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": "paper-context-retrieval",
-                    "type": "function",
-                    "function": {"name": "paper_search", "arguments": json.dumps(arguments, ensure_ascii=False)},
-                }],
-            })
-            messages.append({
-                "role": "tool", "tool_call_id": "paper-context-retrieval",
-                "name": "paper_search", "content": result_content,
-            })
-            steps.append({
-                "kind": "tool_call", "round_no": 0, "tool": "paper_search",
-                "args": arguments, "ok": result.ok,
-                "elapsed_ms": int((time.monotonic() - call_started) * 1000),
-                "result_preview": result_content[:700], "result_data": result.data,
-            })
+    yield {"type": "start", "run_id": run_id, "mode": mode, "rounds_limit": MAX_ROUNDS}
 
-    for round_no in range(1, MAX_ROUNDS + 1):
-        rounds = round_no
-        if total_tokens >= MAX_TOKENS_PER_RUN:
-            status = "token_limit"
-            steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {MAX_TOKENS_PER_RUN}"})
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 1:
-            status = "timeout"
-            steps.append({"kind": "limit", "round_no": round_no, "reason": "总耗时达到上限"})
-            break
-        messages = _fit_context(messages)
-        try:
+    try:
+        # Paper mode is specifically for discussing the locally parsed PDF. Do not
+        # rely on the model to infer that context from phrases like "summarize it";
+        # perform the local retrieval first, then let the model synthesize the evidence.
+        if mode == "paper" and not re.search(
+            r"(?:找|搜索|检索|推荐|查找)(?:一些|几篇|相关)?(?:新)?(?:论文|文献)|最近.{0,8}(?:论文|文献)",
+            question,
+            re.IGNORECASE,
+        ):
+            paper_tool = get_tool("paper_search")
+            if paper_tool is not None and "paper_search" in tool_names:
+                arguments = {"query": question[:1000], "k": 4}
+                call_started = time.monotonic()
+                yield {"type": "tool_start", "tool": "paper_search", "args": arguments}
+                result = paper_tool.invoke(arguments, context)
+                result_content = result.as_tool_message()[:MAX_TOOL_OUTPUT_CHARS]
+                signature = "paper_search:" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+                seen_calls.add(signature)
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "paper-context-retrieval",
+                        "type": "function",
+                        "function": {"name": "paper_search", "arguments": json.dumps(arguments, ensure_ascii=False)},
+                    }],
+                })
+                messages.append({
+                    "role": "tool", "tool_call_id": "paper-context-retrieval",
+                    "name": "paper_search", "content": result_content,
+                })
+                elapsed_ms = int((time.monotonic() - call_started) * 1000)
+                steps.append({
+                    "kind": "tool_call", "round_no": 0, "tool": "paper_search",
+                    "args": arguments, "ok": result.ok,
+                    "elapsed_ms": elapsed_ms,
+                    "result_preview": result_content[:700], "result_data": result.data,
+                })
+                yield {
+                    "type": "tool_end", "tool": "paper_search", "ok": result.ok,
+                    "elapsed_ms": elapsed_ms, "preview": result_content[:700],
+                }
+
+        for round_no in range(1, MAX_ROUNDS + 1):
+            rounds = round_no
+            if should_stop():
+                status = "cancelled"
+                steps.append({"kind": "limit", "round_no": round_no, "reason": "用户停止了本次回答"})
+                yield {"type": "limit", "reason": "已按你的要求停止"}
+                break
+            if total_tokens >= MAX_TOKENS_PER_RUN:
+                status = "token_limit"
+                steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {MAX_TOKENS_PER_RUN}"})
+                yield {"type": "limit", "reason": f"已达本次 token 预算上限（{MAX_TOKENS_PER_RUN}）"}
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                status = "timeout"
+                steps.append({"kind": "limit", "round_no": round_no, "reason": "总耗时达到上限"})
+                yield {"type": "limit", "reason": "已达本次回答的时间上限"}
+                break
+            messages = _fit_context(messages)
+
+            turn = None
             llm_started = time.monotonic()
-            message, usage = chat_completion(
-                messages, tools=schemas, timeout=min(30, remaining), model=selected_model
-            )
-            total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
-            steps.append({"kind": "llm_call", "round_no": round_no, "elapsed_ms": int((time.monotonic() - llm_started) * 1000)})
-        except Exception as exc:
-            logger.exception("Agent 模型调用失败 | run_id=%s", run_id)
-            status = "error"
-            steps.append({"kind": "error", "round_no": round_no, "detail": f"模型调用失败：{type(exc).__name__}"})
-            reply = "千问服务暂时不可用，请稍后重试。"
-            break
-
-        calls = getattr(message, "tool_calls", None) or []
-        if not calls:
-            reply = getattr(message, "content", None) or "（模型未返回文本）"
-            steps.append({"kind": "final", "round_no": round_no})
-            break
-
-        accepted = calls[:MAX_TOOL_CALLS_PER_ROUND]
-        messages.append(_plain_message(message))
-        if len(calls) > len(accepted):
-            steps.append({"kind": "limit", "round_no": round_no, "reason": f"单轮工具数上限为 {MAX_TOOL_CALLS_PER_ROUND}"})
-        for call in accepted:
-            name = str(call.function.name)
-            raw_arguments = call.function.arguments or "{}"
-            call_started = time.monotonic()
             try:
-                arguments = json.loads(raw_arguments)
-                if len(raw_arguments) > 4000:
-                    raise ValueError("工具参数过长")
-            except (json.JSONDecodeError, ValueError) as exc:
-                arguments = {}
-                result_content = f"工具执行失败：参数格式无效（{str(exc)[:120]}）"
-                result_data = {}
-                ok = False
-            else:
-                signature = name + ":" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-                tool = get_tool(name)
-                if signature in seen_calls:
-                    result_content = "工具执行失败：检测到完全重复的调用，请换一种检索条件或直接作答。"
-                    result_data, ok = {}, False
-                elif tool is None or name not in tool_names:
-                    result_content = "工具执行失败：该工具不在本次会话允许列表内。"
-                    result_data, ok = {}, False
-                else:
-                    seen_calls.add(signature)
-                    result = tool.invoke(arguments, context)
-                    result_content = result.as_tool_message()
-                    result_data, ok = result.data, result.ok
-            elapsed_ms = int((time.monotonic() - call_started) * 1000)
-            result_content = result_content[:MAX_TOOL_OUTPUT_CHARS]
-            steps.append({
-                "kind": "tool_call", "round_no": round_no, "tool": name,
-                "args": arguments, "ok": ok, "elapsed_ms": elapsed_ms,
-                "result_preview": result_content[:700], "result_data": result_data,
-            })
-            messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": result_content})
-        if time.monotonic() >= deadline:
-            status = "timeout"
-            steps.append({"kind": "limit", "round_no": round_no, "reason": "总耗时达到上限"})
-            break
-    else:
-        status = "max_rounds"
-        steps.append({"kind": "limit", "round_no": MAX_ROUNDS, "reason": f"最多执行 {MAX_ROUNDS} 轮"})
+                for kind, payload in chat_completion_stream(
+                    messages, tools=schemas, timeout=min(30, remaining),
+                    model=selected_model, should_stop=should_stop,
+                ):
+                    if kind == "token":
+                        yield {"type": "token", "text": payload}
+                    else:
+                        turn = payload
+            except Exception as exc:
+                logger.exception("Agent 模型调用失败 | run_id=%s", run_id)
+                status = "error"
+                steps.append({"kind": "error", "round_no": round_no, "detail": f"模型调用失败：{type(exc).__name__}"})
+                yield {"type": "error", "message": "千问服务暂时不可用，请稍后重试。"}
+                reply = "千问服务暂时不可用，请稍后重试。"
+                break
 
-    if not reply and status in {"timeout", "max_rounds"}:
-        reply = _final_without_tools(messages, max(2, min(10, deadline - time.monotonic())), selected_model)
-    elif not reply and status == "token_limit":
-        reply = _final_without_tools(messages, max(2, min(10, deadline - time.monotonic())), selected_model)
-    elif not reply and status == "error":
-        reply = "千问服务暂时不可用，请稍后重试。"
-    return {
+            if turn is None:
+                status = "error"
+                steps.append({"kind": "error", "round_no": round_no, "detail": "模型未返回任何内容"})
+                yield {"type": "error", "message": "模型没有返回内容，请重试。"}
+                reply = "模型没有返回内容，请重试。"
+                break
+
+            total_tokens += int(turn.get("usage") or 0)
+            if turn.get("content"):
+                visible_parts.append(turn["content"])
+            steps.append({"kind": "llm_call", "round_no": round_no, "elapsed_ms": int((time.monotonic() - llm_started) * 1000)})
+
+            if turn.get("cancelled"):
+                status = "cancelled"
+                reply = turn.get("content") or ""
+                steps.append({"kind": "limit", "round_no": round_no, "reason": "用户停止了本次回答"})
+                yield {"type": "limit", "reason": "已按你的要求停止"}
+                break
+
+            calls = turn.get("tool_calls") or []
+            if not calls:
+                reply = turn.get("content") or "（模型未返回文本）"
+                steps.append({"kind": "final", "round_no": round_no})
+                break
+
+            accepted = calls[:MAX_TOOL_CALLS_PER_ROUND]
+            messages.append(_assistant_message(turn.get("content") or "", calls))
+            if len(calls) > len(accepted):
+                steps.append({"kind": "limit", "round_no": round_no, "reason": f"单轮工具数上限为 {MAX_TOOL_CALLS_PER_ROUND}"})
+                yield {"type": "limit", "reason": f"单轮工具数超过上限（{MAX_TOOL_CALLS_PER_ROUND}），已忽略多余调用"}
+
+            for call in accepted:
+                if should_stop():
+                    status = "cancelled"
+                    steps.append({"kind": "limit", "round_no": round_no, "reason": "用户停止了本次回答"})
+                    yield {"type": "limit", "reason": "已按你的要求停止"}
+                    break
+
+                name = str(call.get("name") or "")
+                raw_arguments = call.get("arguments") or "{}"
+                call_started = time.monotonic()
+                yield {"type": "tool_start", "tool": name, "args": _safe_args(raw_arguments)}
+                try:
+                    arguments = json.loads(raw_arguments)
+                    if len(raw_arguments) > 4000:
+                        raise ValueError("工具参数过长")
+                    if not isinstance(arguments, dict):
+                        raise ValueError("工具参数必须是 JSON 对象")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    arguments = {}
+                    result_content = f"工具执行失败：参数格式无效（{str(exc)[:120]}）"
+                    result_data = {}
+                    ok = False
+                else:
+                    signature = name + ":" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+                    tool = get_tool(name)
+                    if signature in seen_calls:
+                        result_content = "工具执行失败：检测到完全重复的调用，请换一种检索条件或直接作答。"
+                        result_data, ok = {}, False
+                    elif tool is None or name not in tool_names:
+                        result_content = "工具执行失败：该工具不在本次会话允许列表内。"
+                        result_data, ok = {}, False
+                    else:
+                        seen_calls.add(signature)
+                        result = tool.invoke(arguments, context)
+                        result_content = result.as_tool_message()
+                        result_data, ok = result.data, result.ok
+                elapsed_ms = int((time.monotonic() - call_started) * 1000)
+                result_content = result_content[:MAX_TOOL_OUTPUT_CHARS]
+                steps.append({
+                    "kind": "tool_call", "round_no": round_no, "tool": name,
+                    "args": arguments, "ok": ok, "elapsed_ms": elapsed_ms,
+                    "result_preview": result_content[:700], "result_data": result_data,
+                })
+                yield {
+                    "type": "tool_end", "tool": name, "ok": ok,
+                    "elapsed_ms": elapsed_ms, "preview": result_content[:700],
+                }
+                messages.append({
+                    "role": "tool", "tool_call_id": call.get("id") or f"call_{len(messages)}",
+                    "name": name, "content": result_content,
+                })
+
+            if status == "cancelled":
+                break
+            if time.monotonic() >= deadline:
+                status = "timeout"
+                steps.append({"kind": "limit", "round_no": round_no, "reason": "总耗时达到上限"})
+                yield {"type": "limit", "reason": "已达本次回答的时间上限"}
+                break
+        else:
+            status = "max_rounds"
+            steps.append({"kind": "limit", "round_no": MAX_ROUNDS, "reason": f"最多执行 {MAX_ROUNDS} 轮"})
+            yield {"type": "limit", "reason": f"已达到最多 {MAX_ROUNDS} 轮工具调用"}
+
+        if not reply and status in {"timeout", "max_rounds", "token_limit"}:
+            closing = yield from _final_stream(
+                messages, max(2, min(10, deadline - time.monotonic())), selected_model, should_stop
+            )
+            reply = closing
+            visible_parts.append(closing)
+        elif not reply and status == "error":
+            reply = "千问服务暂时不可用，请稍后重试。"
+
+    except Exception:
+        logger.exception("Agent 执行异常 | run_id=%s", run_id)
+        status = "error"
+        reply = reply or "处理过程中出现异常，请稍后重试。"
+        steps.append({"kind": "error", "round_no": rounds, "detail": "Agent 执行异常"})
+        yield {"type": "error", "message": reply}
+    finally:
+        clear_cancel(run_id)
+
+    if status != "error" and visible_parts:
+        reply = "\n\n".join(part for part in visible_parts if part.strip())
+
+    yield {
+        "type": "done",
         "run_id": run_id,
         "reply": reply,
         "steps": steps,
@@ -327,3 +465,42 @@ def run_agent(
         "duration_ms": int((time.monotonic() - started) * 1000),
         "total_tokens": total_tokens,
     }
+
+
+def run_agent(
+    question: str,
+    history: list[dict] | None = None,
+    mode: str = "chat",
+    filename: str | None = None,
+    image_path: str | None = None,
+    memory_context: str = "",
+    allowed_tools: list[str] | None = None,
+    allow_writes: bool = False,
+    allow_workspace: bool = False,
+) -> dict:
+    """非流式包装：把事件流跑完，返回旧格式结果，旧接口与测试继续可用。"""
+    final: dict = {}
+    for event in run_agent_stream(
+        question,
+        history=history,
+        mode=mode,
+        filename=filename,
+        image_path=image_path,
+        memory_context=memory_context,
+        allowed_tools=allowed_tools,
+        allow_writes=allow_writes,
+        allow_workspace=allow_workspace,
+    ):
+        if event.get("type") == "done":
+            final = {key: value for key, value in event.items() if key != "type"}
+    if not final:
+        return {
+            "run_id": uuid.uuid4().hex,
+            "reply": "处理过程中出现异常，请稍后重试。",
+            "steps": [],
+            "status": "error",
+            "rounds": 0,
+            "duration_ms": 0,
+            "total_tokens": 0,
+        }
+    return final

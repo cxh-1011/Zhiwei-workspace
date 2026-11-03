@@ -201,6 +201,13 @@ async function apiFetch(path, options) {
 
         } catch (err) {
 
+            // 用户主动停止（AbortController）不是网络故障，不要重试别的地址
+            if (err && err.name === "AbortError") {
+
+                throw err;
+
+            }
+
             attempts.push(
                 "✗ " + full + " → 网络错误 " +
                 ((err && err.name) || "") + " " + ((err && err.message) || "")
@@ -829,7 +836,256 @@ function openChat(id) {
 // 九、发送消息
 // =============================
 
+// 工具名称 → 中文说明，流式状态行和过程时间线共用
+const TOOL_LABELS = {
+    web_search: "联网搜索",
+    paper_search: "检索论文",
+    scholarly_search: "学术论文检索",
+    search_uploaded_files: "检索上传资料",
+    list_uploaded_files: "查看资料列表",
+    remember: "记住这条信息",
+    list_learning_tasks: "读取任务列表",
+    set_task_status: "更新任务状态",
+    list_dir: "查看目录",
+    read_file: "读取文件",
+    grep_code: "搜索代码"
+};
+
+function toolLabel(name) {
+    return TOOL_LABELS[name] || name || "工具";
+}
+
+// 正在进行的流式请求：{ controller, runId, stopped, timer }
+let activeStream = null;
+
+
+// 读取 SSE：后端每帧是 "data: {json}\n\n"
+async function streamChat(payload, onEvent, signal) {
+
+    const res = await apiFetch("/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: signal
+    });
+
+    if (!res.ok) {
+
+        const data = await parseJson(res);
+
+        const err = new Error(httpErrorText(res, data));
+
+        err.status = res.status;
+
+        err.tips = httpErrorTips(res.status);
+
+        throw err;
+
+    }
+
+    if (!res.body || typeof res.body.getReader !== "function") {
+
+        throw new Error("当前浏览器不支持流式读取，请换用新版 Chrome 或 Edge。");
+
+    }
+
+    const reader = res.body.getReader();
+
+    const decoder = new TextDecoder("utf-8");
+
+    let buffer = "";
+
+    while (true) {
+
+        const chunk = await reader.read();
+
+        if (chunk.done) break;
+
+        buffer += decoder.decode(chunk.value, { stream: true });
+
+        let cut = buffer.indexOf("\n\n");
+
+        while (cut !== -1) {
+
+            const frame = buffer.slice(0, cut);
+
+            buffer = buffer.slice(cut + 2);
+
+            const line = frame.split("\n").find(item => item.startsWith("data:"));
+
+            if (line) {
+
+                const raw = line.slice(5).trim();
+
+                if (raw) {
+
+                    let event = null;
+
+                    try {
+
+                        event = JSON.parse(raw);
+
+                    } catch (e) {
+
+                        event = null;
+
+                    }
+
+                    if (event) onEvent(event);
+
+                }
+
+            }
+
+            cut = buffer.indexOf("\n\n");
+
+        }
+
+    }
+
+}
+
+
+// 发送按钮在「发送」和「停止」之间切换
+function setStopUI(streaming) {
+
+    const btn = $("sendBtn");
+
+    if (!btn) return;
+
+    if (streaming) {
+
+        if (!btn.dataset.idleHtml) btn.dataset.idleHtml = btn.innerHTML;
+
+        btn.disabled = false;
+
+        btn.classList.add("stopping");
+
+        btn.innerHTML = '停止<span class="send-arrow">■</span>';
+
+        btn.onclick = stopGeneration;
+
+    } else {
+
+        btn.classList.remove("stopping");
+
+        if (btn.dataset.idleHtml) btn.innerHTML = btn.dataset.idleHtml;
+
+        btn.disabled = false;
+
+        btn.onclick = sendMessage;
+
+    }
+
+}
+
+
+// 点「停止」：先通知后端中断，再等它把 done 回过来；超时才强制断开
+function stopGeneration() {
+
+    if (!activeStream || activeStream.stopped) return;
+
+    activeStream.stopped = true;
+
+    const btn = $("sendBtn");
+
+    if (btn) {
+
+        btn.disabled = true;
+
+        btn.innerHTML = "正在停止…";
+
+    }
+
+    if (activeStream.runId) {
+
+        apiFetch("/chat/cancel/" + encodeURIComponent(activeStream.runId), { method: "POST" })
+            .catch(() => { });
+
+    }
+
+    activeStream.timer = setTimeout(() => {
+
+        if (activeStream) activeStream.controller.abort();
+
+    }, 4000);
+
+}
+
+
+// 收尾：把流式纯文本换成 Markdown，并把过程时间线插到回答上方
+function finalizeStream(box, statusLine, answer, event, buffer, question) {
+
+    if (statusLine && statusLine.parentNode) statusLine.remove();
+
+    // 后端可能因为中断而返回空字符串，这时用已经流式收到的内容兜底
+    let reply = (event.reply === undefined || event.reply === null || event.reply === "")
+        ? buffer
+        : String(event.reply);
+
+    // done 里的 reply 只包含最后一次模型输出。如果前面还有已经展示过的过渡语句，
+    // 收尾时改用完整 buffer，避免文字突然变少。
+    if (buffer && reply && buffer.length > reply.length && buffer.trim().endsWith(reply.trim())) {
+
+        reply = buffer;
+
+    }
+
+    if (Array.isArray(event.steps) && event.steps.length) {
+
+        box.insertBefore(
+            renderAgentTrace(event.steps, event.status, event.rounds, event.duration_ms),
+            box.firstChild
+        );
+
+    }
+
+    if (activeMode === "chat" && isMusicReply(reply)) {
+
+        answer.innerHTML = createMusicCard(reply);
+
+    } else {
+
+        answer.innerHTML = renderMarkdown(reply);
+
+    }
+
+    if (event.status === "cancelled") {
+
+        const note = document.createElement("div");
+
+        note.className = "stream-note";
+
+        note.textContent = "已停止生成";
+
+        box.appendChild(note);
+
+    }
+
+    const titleEl = $("currentTitle");
+
+    if (titleEl) titleEl.textContent = question.slice(0, 15);
+
+    loadChats();
+
+    if (allowWrites) {
+
+        loadMemories();
+
+        loadLearningPlans();
+
+    }
+
+    const chat = $("chat");
+
+    if (chat) chat.scrollTop = chat.scrollHeight;
+
+}
+
+
 async function sendMessage() {
+
+    if (activeStream) return;
 
     const input = $("input");
 
@@ -853,6 +1109,9 @@ async function sendMessage() {
         return;
     }
 
+    const chat = $("chat");
+
+    if (!chat) return;
 
     // 显示用户消息
     addMessage("user", text);
@@ -860,105 +1119,171 @@ async function sendMessage() {
     input.value = "";
     input.style.height = "auto";
 
+    // 回答容器先挂上去，第一个 token 一到就能画出来
+    const box = document.createElement("div");
 
-    // AI思考动画
-    const thinking = document.createElement("div");
+    box.className = "ai";
 
-    thinking.className = "ai thinking";
+    const statusLine = document.createElement("div");
 
-    thinking.innerHTML = `
-        <span></span><span></span><span></span>
-        <small>正在分析问题，并判断是否需要检索资料…</small>
-    `;
+    statusLine.className = "stream-status";
 
-    const chat = $("chat");
+    statusLine.textContent = "正在思考…";
 
-    if (!chat) return;
+    const answer = document.createElement("div");
 
-    chat.appendChild(thinking);
+    answer.className = "agent-answer";
+
+    box.appendChild(statusLine);
+
+    box.appendChild(answer);
+
+    chat.appendChild(box);
 
     chat.scrollTop = chat.scrollHeight;
 
-    setBtnLoading("sendBtn", true, "发送中…");
+    const controller = new AbortController();
 
+    activeStream = { controller: controller, runId: null, stopped: false, timer: null };
+
+    setStopUI(true);
+
+    let buffer = "";
+
+    let finished = false;
+
+    let pending = false;
+
+    const paint = () => {
+
+        pending = false;
+
+        answer.textContent = buffer;
+
+        chat.scrollTop = chat.scrollHeight;
+
+    };
 
     try {
 
         // 没有当前会话就先建一个
         const chatId = await ensureChatId();
 
-        const data = await apiJson("/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+        await streamChat(
+            {
                 text: text,
                 chat_id: chatId,
                 mode: activeMode || "chat",
                 filename: activeMode === "file" ? selectedFilename : null,
                 allow_writes: allowWrites,
                 allow_workspace: allowWorkspace
-            })
-        });
+            },
+            event => {
 
-        thinking.remove();
+                switch (event.type) {
 
-        const reply = (data && data.reply !== undefined)
-            ? data.reply
-            : "（后端未返回内容）";
+                    case "start":
+                        if (activeStream) activeStream.runId = event.run_id;
+                        break;
 
-        const titleEl = $("currentTitle");
-        if (titleEl) titleEl.textContent = text.slice(0, 15);
-        loadChats();
+                    case "tool_start":
+                        statusLine.hidden = false;
+                        statusLine.classList.add("active");
+                        statusLine.textContent = "正在" + toolLabel(event.tool) + "…";
+                        break;
 
-        const div = document.createElement("div");
+                    case "tool_end":
+                        statusLine.hidden = false;
+                        statusLine.classList.remove("active");
+                        statusLine.textContent = (event.ok ? "已完成 " : "未成功 ") + toolLabel(event.tool);
+                        // 多轮之间留一个空行，免得「我查一下…」和正式回答黏在一起
+                        if (buffer.trim() && !buffer.endsWith("\n\n")) {
 
-        div.className = "ai";
+                            buffer += "\n\n";
 
-        chat.appendChild(div);
+                            if (!pending) {
 
-        if (Array.isArray(data.steps) && data.steps.length) {
-            div.appendChild(renderAgentTrace(data.steps, data.status, data.rounds, data.duration_ms));
-        }
+                                pending = true;
 
-        const answer = document.createElement("div");
-        answer.className = "agent-answer";
-        div.appendChild(answer);
+                                requestAnimationFrame(paint);
 
-        // 判断音乐卡片
-        if (activeMode === "chat" && isMusicReply(reply)) {
+                            }
 
-            answer.innerHTML = createMusicCard(reply);
+                        }
+                        break;
 
-        } else {
+                    case "token":
+                        if (activeStream && activeStream.stopped) break;
+                        buffer += event.text;
+                        if (!pending) {
 
-            // 普通AI回答逐字显示
-            typeWriter(answer, reply, 30);
+                            pending = true;
 
-        }
+                            requestAnimationFrame(paint);
 
-        chat.scrollTop = chat.scrollHeight;
+                        }
+                        break;
 
-        // 开启写入时，助手可能改了档案内容——静默同步，下次打开学习档案就是最新的
-        if (allowWrites) {
-            loadMemories();
-            loadLearningPlans();
-        }
+                    case "limit":
+                        statusLine.hidden = false;
+                        statusLine.textContent = event.reason || "达到保护限制";
+                        break;
+
+                    case "error":
+                        statusLine.hidden = false;
+                        statusLine.textContent = event.message || "回答中断";
+                        break;
+
+                    case "done":
+                        finished = true;
+                        finalizeStream(box, statusLine, answer, event, buffer, text);
+                        break;
+
+                }
+
+            },
+            controller.signal
+        );
 
     } catch (err) {
 
-        thinking.remove();
+        if (err && err.name === "AbortError") {
 
-        addMessage("ai", "请求失败：" + err.message);
+            statusLine.hidden = false;
+
+            statusLine.textContent = "已停止";
+
+        } else {
+
+            statusLine.hidden = true;
+
+            const tip = document.createElement("div");
+
+            tip.className = "stream-error";
+
+            tip.textContent = "请求失败：" + ((err && err.message) || "未知错误");
+
+            box.appendChild(tip);
+
+        }
 
     } finally {
 
-        setBtnLoading("sendBtn", false);
+        if (activeStream && activeStream.timer) clearTimeout(activeStream.timer);
+
+        if (!finished && buffer) {
+
+            answer.innerHTML = renderMarkdown(buffer);
+
+        }
+
+        activeStream = null;
+
+        setStopUI(false);
 
     }
 
 }
-
-
 
 // =============================
 // 十、添加消息
@@ -1053,13 +1378,7 @@ function renderAgentTrace(steps, status, rounds, durationMs) {
     details.appendChild(summary);
     const list = document.createElement("ol");
     list.className = "agent-trace-list";
-    const labels = {
-        web_search: "联网搜索",
-        paper_search: "检索论文",
-        scholarly_search: "学术论文检索",
-        search_uploaded_files: "检索上传资料",
-        list_uploaded_files: "查看资料列表"
-    };
+    const labels = TOOL_LABELS;
     steps.forEach(step => {
         const item = document.createElement("li");
         const title = document.createElement("strong");
@@ -1114,7 +1433,9 @@ function renderAgentTrace(steps, status, rounds, durationMs) {
         const notice = document.createElement("div");
         notice.className = "trace-status";
         notice.textContent = status === "max_rounds" ? "已达到最大工具调用轮数，回答可能不完整。" :
-            status === "timeout" ? "本次运行达到时间上限，回答基于已有资料。" : "本次运行未能完整完成。";
+            status === "timeout" ? "本次运行达到时间上限，回答基于已有资料。" :
+                status === "cancelled" ? "你停止了本次回答，上面是已经生成的部分。" :
+                    "本次运行未能完整完成。";
         details.appendChild(notice);
     }
     return details;

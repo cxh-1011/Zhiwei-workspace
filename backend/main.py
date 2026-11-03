@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
 import hashlib
@@ -30,7 +30,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # AI助手角色设定
 # ======================
 
-from agent import run_agent
+from agent import run_agent, run_agent_stream, request_cancel
 from llm import chat_completion
 
 from config import (
@@ -263,52 +263,119 @@ def logout(response: Response):
 # 聊天
 # ======================
 
+def _chat_context(message: Message) -> dict:
+    """校验请求并准备上下文。/chat 与 /chat/stream 共用，保证两条路径行为一致。"""
+    if message.mode not in {"chat", "file", "paper"}:
+        raise HTTPException(status_code=400, detail="未知的对话模式。")
+    selected_filename = None
+    image_path = None
+    if message.mode == "file":
+        selected_filename = os.path.basename((message.filename or "").replace("\\", "/"))
+        if not selected_filename or selected_filename != (message.filename or "").replace("\\", "/"):
+            raise HTTPException(status_code=400, detail="请选择有效的上传文件。")
+        if not os.path.isfile(os.path.join(UPLOAD_DIR, selected_filename)):
+            raise HTTPException(status_code=404, detail="指定资料不存在，请重新选择或上传。")
+        extension = os.path.splitext(selected_filename)[1].lower()
+        if extension in IMAGE_MIME_TYPES:
+            if os.path.getsize(os.path.join(UPLOAD_DIR, selected_filename)) > MAX_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="图片不能超过 10 MB，请压缩后重新上传。")
+            image_path = os.path.join(UPLOAD_DIR, selected_filename)
+
+    history = [
+        {"role": "assistant" if role == "ai" else "user", "content": content}
+        for role, content in get_recent_messages(message.chat_id, 12)
+        if role in {"user", "ai"}
+    ]
+    memories = list_memories(20)
+    memory_context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
+    active_plans = [row for row in list_learning_plans(10) if row[4] == "active"][:3]
+    if active_plans:
+        memory_context += "\n当前学习计划：\n" + "\n".join(f"- {row[1]}：{row[2]}" for row in active_plans)
+
+    return {
+        "history": history,
+        "filename": selected_filename,
+        "image_path": image_path,
+        "memory_context": memory_context,
+    }
+
+
+def _persist_chat(chat_id: int, question: str, result: dict) -> None:
+    update_chat_title(chat_id, question[:15])
+    save_message(chat_id, "user", question)
+    save_message(chat_id, "ai", result["reply"])
+    save_agent_run(chat_id, question, result)
+
+
 @app.post("/chat")
 def chat(message: Message):
+    ctx = _chat_context(message)
     try:
-        if message.mode not in {"chat", "file", "paper"}:
-            raise HTTPException(status_code=400, detail="未知的对话模式。")
-        selected_filename = None
-        image_path = None
-        if message.mode == "file":
-            selected_filename = os.path.basename((message.filename or "").replace("\\", "/"))
-            if not selected_filename or selected_filename != message.filename.replace("\\", "/"):
-                raise HTTPException(status_code=400, detail="请选择有效的上传文件。")
-            if not os.path.isfile(os.path.join(UPLOAD_DIR, selected_filename)):
-                raise HTTPException(status_code=404, detail="指定资料不存在，请重新选择或上传。")
-            extension = os.path.splitext(selected_filename)[1].lower()
-            if extension in IMAGE_MIME_TYPES:
-                if os.path.getsize(os.path.join(UPLOAD_DIR, selected_filename)) > MAX_IMAGE_BYTES:
-                    raise HTTPException(status_code=413, detail="图片不能超过 10 MB，请压缩后重新上传。")
-                image_path = os.path.join(UPLOAD_DIR, selected_filename)
-
-        history = [
-            {"role": "assistant" if role == "ai" else "user", "content": content}
-            for role, content in get_recent_messages(message.chat_id, 12)
-            if role in {"user", "ai"}
-        ]
-        memories = list_memories(20)
-        memory_context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
-        active_plans = [row for row in list_learning_plans(10) if row[4] == "active"][:3]
-        if active_plans:
-            memory_context += "\n当前学习计划：\n" + "\n".join(f"- {row[1]}：{row[2]}" for row in active_plans)
-
         result = run_agent(
-            message.text, history=history, mode=message.mode,
-            filename=selected_filename, image_path=image_path, memory_context=memory_context,
+            message.text, history=ctx["history"], mode=message.mode,
+            filename=ctx["filename"], image_path=ctx["image_path"],
+            memory_context=ctx["memory_context"],
             allow_writes=message.allow_writes,
             allow_workspace=message.allow_workspace,
         )
-        update_chat_title(message.chat_id, message.text[:15])
-        save_message(message.chat_id, "user", message.text)
-        save_message(message.chat_id, "ai", result["reply"])
-        save_agent_run(message.chat_id, message.text, result)
+        _persist_chat(message.chat_id, message.text, result)
         return result
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Agent 聊天接口失败 | chat_id=%s", message.chat_id)
         raise HTTPException(status_code=502, detail="AI 对话暂时不可用，请稍后重试。") from exc
+
+
+def _sse(event: dict) -> str:
+    """一条 SSE 帧。前端按 \\n\\n 切分，再取 data: 后面的 JSON。"""
+    return "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+
+
+@app.post("/chat/stream")
+def chat_stream(message: Message):
+    """流式聊天：边跑边推 token 和工具事件，可用 /chat/cancel/{run_id} 停止。
+
+    请求校验放在返回响应之前，这样参数错误仍然是正常的 HTTP 4xx，而不是流里的一声报错。
+    落库放在流末尾的 finally 里：前端中途断开也不会丢记录。
+    """
+    ctx = _chat_context(message)
+
+    def event_stream():
+        result = None
+        try:
+            for event in run_agent_stream(
+                message.text, history=ctx["history"], mode=message.mode,
+                filename=ctx["filename"], image_path=ctx["image_path"],
+                memory_context=ctx["memory_context"],
+                allow_writes=message.allow_writes,
+                allow_workspace=message.allow_workspace,
+            ):
+                if event.get("type") == "done":
+                    result = event
+                yield _sse(event)
+        except Exception:
+            logger.exception("流式对话中断 | chat_id=%s", message.chat_id)
+            yield _sse({"type": "error", "message": "流式对话中断，请重试。"})
+            return
+        finally:
+            if result is not None:
+                try:
+                    _persist_chat(message.chat_id, message.text, result)
+                except Exception:
+                    logger.exception("保存流式对话记录失败 | chat_id=%s", message.chat_id)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={
+        # 关掉 Nginx 等反向代理的缓冲，否则 token 会被攒成一坨再下发
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+    })
+
+
+@app.post("/chat/cancel/{run_id}")
+def cancel_chat(run_id: str):
+    request_cancel(run_id)
+    return {"cancelled": True, "run_id": run_id}
 
 
 # ======================
