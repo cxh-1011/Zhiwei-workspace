@@ -116,10 +116,20 @@ def init_db():
 
 
 
+    # ---- 模型服务商配置表 ----
+    # 表结构由 model_store 维护，这里同步建一次，保证 /models 第一次调用就能读写。
+    from model_store import PROVIDER_SCHEMA
+
+    cursor.execute(PROVIDER_SCHEMA)
+
     # ---- 兼容旧库的增量迁移 ----
     # memories 新增 source 列：区分「用户手动添加」和「助手写入」，
     # 让用户能审计、能只删助手加的那些。旧库没有这列，这里补上。
     _ensure_column(cursor, "memories", "source", "TEXT DEFAULT 'user'")
+
+    # agent_runs 记录本次用的服务商与模型，切换 API 后能回溯「这条回答是谁答的」
+    _ensure_column(cursor, "agent_runs", "provider", "TEXT")
+    _ensure_column(cursor, "agent_runs", "model", "TEXT")
 
     conn.commit()
 
@@ -374,9 +384,10 @@ def save_agent_run(chat_id, question, result):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT OR REPLACE INTO agent_runs(run_id,chat_id,question,reply,status,rounds,duration_ms,total_tokens) VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT OR REPLACE INTO agent_runs(run_id,chat_id,question,reply,status,rounds,duration_ms,total_tokens,provider,model) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (result["run_id"], chat_id, question, result["reply"], result["status"],
-         result["rounds"], result["duration_ms"], result["total_tokens"]),
+         result["rounds"], result["duration_ms"], result["total_tokens"],
+         result.get("provider"), result.get("model")),
     )
     for index, step in enumerate(result.get("steps", [])):
         cursor.execute(
@@ -394,7 +405,7 @@ def save_agent_run(chat_id, question, result):
 def get_agent_run(run_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT run_id,chat_id,question,reply,status,rounds,duration_ms,total_tokens,created_at FROM agent_runs WHERE run_id=?", (run_id,))
+    cursor.execute("SELECT run_id,chat_id,question,reply,status,rounds,duration_ms,total_tokens,provider,model,created_at FROM agent_runs WHERE run_id=?", (run_id,))
     run = cursor.fetchone()
     if not run:
         conn.close()
@@ -412,7 +423,7 @@ def get_agent_run(run_id):
             except (ValueError, TypeError):
                 item[key] = {}
         parsed_steps.append(item)
-    return {"run": dict(zip(("run_id", "chat_id", "question", "reply", "status", "rounds", "duration_ms", "total_tokens", "created_at"), run)), "steps": parsed_steps}
+    return {"run": dict(zip(("run_id", "chat_id", "question", "reply", "status", "rounds", "duration_ms", "total_tokens", "provider", "model", "created_at"), run)), "steps": parsed_steps}
 
 
 def get_agent_runs_for_chat(chat_id, limit=100):

@@ -7,7 +7,7 @@ import time
 import uuid
 import base64
 
-from llm import VISION_MODEL, chat_completion_stream
+from llm import ModelConfigError, chat_completion_stream
 from tools import all_schemas, get_tool
 import tools as registered_tools  # noqa: F401
 
@@ -137,7 +137,7 @@ def _safe_args(raw_arguments: str) -> dict:
         return {}
 
 
-def _final_stream(messages: list[dict], timeout: float, model: str | None, should_stop):
+def _final_stream(messages: list[dict], timeout: float, require_vision: bool, should_stop):
     """达到限制后，让模型用已有材料收尾。这里同样流式输出。"""
     messages = messages + [{
         "role": "user",
@@ -146,12 +146,17 @@ def _final_stream(messages: list[dict], timeout: float, model: str | None, shoul
     reply = ""
     try:
         for kind, payload in chat_completion_stream(
-            messages, tools=None, timeout=timeout, model=model, should_stop=should_stop
+            messages, tools=None, timeout=timeout, should_stop=should_stop,
+            require_vision=require_vision,
         ):
             if kind == "token":
                 yield {"type": "token", "text": payload}
             else:
                 reply = payload.get("content") or ""
+    except ModelConfigError:
+        # 配置问题已经在本轮主循环里明确提示过，收尾阶段不再重复打扰用户
+        logger.warning("收尾阶段模型不可用")
+        reply = ""
     except Exception:
         logger.exception("Agent 达到限制后生成收尾回答失败")
         reply = ""
@@ -243,7 +248,9 @@ def run_agent_stream(
         ]
     messages.append({"role": "user", "content": user_content})
 
-    selected_model = VISION_MODEL if image_path else None
+    require_vision = bool(image_path)
+    used_model = None
+    used_provider = None
     schemas = all_schemas(tool_names)
     rounds = 0
     total_tokens = 0
@@ -325,18 +332,26 @@ def run_agent_stream(
             try:
                 for kind, payload in chat_completion_stream(
                     messages, tools=schemas, timeout=min(30, remaining),
-                    model=selected_model, should_stop=should_stop,
+                    should_stop=should_stop, require_vision=require_vision,
                 ):
                     if kind == "token":
                         yield {"type": "token", "text": payload}
                     else:
                         turn = payload
+            except ModelConfigError as exc:
+                # 没配 Key / 模型不支持图片这类问题，必须原样告诉用户，不能伪装成「服务不可用」
+                logger.warning("模型配置不可用 | run_id=%s | %s", run_id, exc)
+                status = "error"
+                reply = str(exc)
+                steps.append({"kind": "error", "round_no": round_no, "detail": f"模型配置问题：{exc}"})
+                yield {"type": "error", "message": str(exc)}
+                break
             except Exception as exc:
                 logger.exception("Agent 模型调用失败 | run_id=%s", run_id)
                 status = "error"
                 steps.append({"kind": "error", "round_no": round_no, "detail": f"模型调用失败：{type(exc).__name__}"})
-                yield {"type": "error", "message": "千问服务暂时不可用，请稍后重试。"}
-                reply = "千问服务暂时不可用，请稍后重试。"
+                reply = "模型服务暂时不可用，请稍后重试，或到「模型与 API Key」里检查配置。"
+                yield {"type": "error", "message": reply}
                 break
 
             if turn is None:
@@ -345,6 +360,9 @@ def run_agent_stream(
                 yield {"type": "error", "message": "模型没有返回内容，请重试。"}
                 reply = "模型没有返回内容，请重试。"
                 break
+
+            used_model = turn.get("model") or used_model
+            used_provider = turn.get("provider") or used_provider
 
             total_tokens += int(turn.get("usage") or 0)
             if turn.get("content"):
@@ -436,12 +454,12 @@ def run_agent_stream(
 
         if not reply and status in {"timeout", "max_rounds", "token_limit"}:
             closing = yield from _final_stream(
-                messages, max(2, min(10, deadline - time.monotonic())), selected_model, should_stop
+                messages, max(2, min(10, deadline - time.monotonic())), require_vision, should_stop
             )
             reply = closing
             visible_parts.append(closing)
         elif not reply and status == "error":
-            reply = "千问服务暂时不可用，请稍后重试。"
+            reply = "模型服务暂时不可用，请稍后重试。"
 
     except Exception:
         logger.exception("Agent 执行异常 | run_id=%s", run_id)
@@ -464,6 +482,9 @@ def run_agent_stream(
         "rounds": rounds,
         "duration_ms": int((time.monotonic() - started) * 1000),
         "total_tokens": total_tokens,
+        # 让运行记录能回答「这条回答是哪个服务商、哪个模型给的」
+        "provider": (used_provider or {}).get("name"),
+        "model": used_model or (used_provider or {}).get("model"),
     }
 
 

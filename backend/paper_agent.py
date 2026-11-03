@@ -13,12 +13,23 @@ import dashscope
 
 from dashscope import Generation
 
-from config import DASHSCOPE_API_KEY
+from model_store import embedding_api_key
 
 
-# 设置千问key
+# 索引与查询用的 Embedding 仍然属于通义千问（其他服务商不提供同款接口）。
+# 不在这里写死 Key：用户可能把聊天模型切成 DeepSeek，Embedding 仍要从任意一条
+# 通义千问配置或 .env 里取。
 
-dashscope.api_key = DASHSCOPE_API_KEY
+def _require_embedding_key():
+    """返回可用的 Embedding Key；没有就抛一条能照着做的错误。"""
+    api_key = embedding_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "论文索引需要通义千问的 Embedding Key。请在「模型与 API Key」里添加一个通义千问服务商，"
+            "或在 backend/.env 中设置 DASHSCOPE_API_KEY。"
+        )
+    dashscope.api_key = api_key
+    return api_key
 
 
 # 索引存放目录（基于本文件定位，跟启动目录无关）
@@ -44,7 +55,7 @@ def _get_embeddings():
 
         model="text-embedding-v3",
 
-        dashscope_api_key=DASHSCOPE_API_KEY
+        dashscope_api_key=_require_embedding_key()
 
     )
 
@@ -223,6 +234,8 @@ def ask_paper(question):
 
 
 """
+
+    _require_embedding_key()
 
     response = Generation.call(
 

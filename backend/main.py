@@ -31,7 +31,8 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # ======================
 
 from agent import run_agent, run_agent_stream, request_cancel
-from llm import chat_completion
+from llm import ModelConfigError, chat_completion, test_connection
+import model_store
 
 from config import (
     APP_PASSWORD_HASH,
@@ -379,6 +380,111 @@ def cancel_chat(run_id: str):
 
 
 # ======================
+# 模型与 API Key
+# ======================
+
+class ProviderPayload(BaseModel):
+    provider: str = "custom"
+    name: str = Field(..., min_length=1, max_length=40)
+    base_url: str = Field(..., min_length=1, max_length=300)
+    api_key: str = Field("", max_length=400)
+    model: str = Field(..., min_length=1, max_length=120)
+    vision_model: str = Field("", max_length=120)
+
+
+class ProviderTestPayload(BaseModel):
+    provider_id: int | None = None
+    base_url: str = Field("", max_length=300)
+    api_key: str = Field("", max_length=400)
+    model: str = Field("", max_length=120)
+
+
+def _clean_provider(data: ProviderPayload) -> dict:
+    preset_id = data.provider if data.provider in model_store.PRESETS else "custom"
+    preset = model_store.PRESETS[preset_id]
+    base_url = (data.base_url or "").strip().rstrip("/")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="接口地址必须以 http:// 或 https:// 开头。")
+    return {
+        "provider": preset_id,
+        "name": (data.name or "").strip() or preset["name"],
+        "base_url": base_url,
+        "api_key": (data.api_key or "").strip(),
+        "model": (data.model or "").strip(),
+        "vision_model": (data.vision_model or "").strip(),
+    }
+
+
+@app.get("/models")
+def list_models():
+    return {
+        "providers": model_store.list_providers(),
+        "active": model_store.public_active(),
+        "presets": model_store.presets(),
+    }
+
+
+@app.post("/models")
+def create_model_provider(data: ProviderPayload):
+    payload = _clean_provider(data)
+    if not payload["api_key"]:
+        raise HTTPException(status_code=400, detail="请填写 API Key。")
+    row = model_store.create_provider(payload)
+    logger.info("新增模型服务商 | id=%s | %s | %s", row["id"], row["name"], row["model"])
+    return {"provider": model_store.public_provider(row), "active": model_store.public_active()}
+
+
+@app.patch("/models/{provider_id}")
+def update_model_provider(provider_id: int, data: ProviderPayload):
+    payload = _clean_provider(data)
+    row = model_store.update_provider(provider_id, payload)
+    if row is None:
+        raise HTTPException(status_code=404, detail="这个服务商不存在或已被删除。")
+    logger.info("更新模型服务商 | id=%s | %s | %s", provider_id, row["name"], row["model"])
+    return {"provider": model_store.public_provider(row), "active": model_store.public_active()}
+
+
+@app.delete("/models/{provider_id}")
+def delete_model_provider(provider_id: int):
+    if not model_store.delete_provider(provider_id):
+        raise HTTPException(status_code=404, detail="这个服务商不存在或已被删除。")
+    return {"deleted": True, "active": model_store.public_active()}
+
+
+@app.post("/models/{provider_id}/activate")
+def activate_model_provider(provider_id: int):
+    if not model_store.activate_provider(provider_id):
+        raise HTTPException(status_code=404, detail="这个服务商不存在或已被删除。")
+    active = model_store.public_active()
+    logger.info("切换模型服务商 | id=%s | %s", provider_id, (active or {}).get("model"))
+    return {"active": active}
+
+
+@app.post("/models/test")
+def test_model_provider(data: ProviderTestPayload):
+    """测试连接。允许测还没保存的草稿；Key 留空时用已保存的那条。"""
+    api_key = (data.api_key or "").strip()
+    base_url = (data.base_url or "").strip()
+    model = (data.model or "").strip()
+    if data.provider_id:
+        stored = model_store.get_provider(data.provider_id)
+        if stored is None:
+            raise HTTPException(status_code=404, detail="这个服务商不存在或已被删除。")
+        api_key = api_key or stored["api_key"]
+        base_url = base_url or stored["base_url"]
+        model = model or stored["model"]
+
+    try:
+        return test_connection(base_url, api_key, model)
+    except ModelConfigError as exc:
+        return {"ok": False, "message": str(exc)}
+    except Exception as exc:
+        # 只回传一条精简的原因，避免把整段堆栈或请求细节丢给页面
+        logger.warning("模型连接测试失败 | %s | %s", model or "-", type(exc).__name__)
+        return {"ok": False, "message": f"连接失败：{str(exc)[:180]}"}
+
+
+# ======================
 # 创建聊天
 # ======================
 
@@ -509,7 +615,11 @@ async def upload_paper(file: UploadFile = File(...)):
 
     path, duplicate = _store_uploaded_content(filename, content)
 
-    count = load_paper(path)
+    try:
+        count = load_paper(path)
+    except RuntimeError as exc:
+        # load_paper 的 RuntimeError 都是能给用户看的说明（缺少 Embedding Key、扫描版 PDF 等）
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
 
@@ -823,6 +933,8 @@ def generate_learning_plan(data: PlanRequest):
     context = "\n".join(f"[{row[2]}] {row[1]}" for row in list_memories(20))
     try:
         generated_title, content, tasks = _generate_plan_payload(goal, context)
+    except ModelConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("生成学习计划失败")
         raise HTTPException(status_code=502, detail="学习计划暂时无法生成，请稍后重试。") from exc

@@ -20,7 +20,7 @@
         <button class="top-action" id="learningHubBtn" onclick="openLearningHub()">▣ <span>学习档案</span></button>
         <button class="top-action" onclick="newChat()">＋ <span>新对话</span></button>
         <button class="top-action" id="logoutBtn" onclick="logout()">↪ <span>退出登录</span></button>
-        <span class="model-pill"><span class="model-dot"></span>Qwen Plus</span>
+        <button class="model-pill" id="modelPill" onclick="openModelSettings()" title="切换模型与 API Key"><span class="model-dot"></span><span id="modelPillText">模型未配置</span></button>
       </div>
       <div id="historyPanel" class="history-panel" hidden><div class="history-heading">最近对话 <button onclick="toggleHistory(false)" aria-label="关闭">×</button></div><div id="chatList" class="chat-list"><div class="empty-hint">正在加载…</div></div></div>
     </header>
@@ -71,13 +71,38 @@
   <dialog id="learningHub" class="learning-hub">
     <div class="learning-head"><div><span class="eyebrow">YOUR LEARNING SPACE</span><h2>学习档案</h2><p>由你确认保存的长期记忆与学习计划会用于个性化回答。</p></div><button class="hub-close" onclick="closeLearningHub()" aria-label="关闭">×</button></div>
     <div class="learning-grid">
-      <section class="learning-section"><h3>长期记忆</h3><p class="learning-help">只保存你主动添加的内容；回答时千问会参考这些信息。</p>
+      <section class="learning-section"><h3>长期记忆</h3><p class="learning-help">只保存你主动添加的内容；回答时当前模型会参考这些信息。</p>
         <form id="memoryForm" onsubmit="saveLearningMemory(event)"><input id="memoryCategory" maxlength="40" placeholder="分类，例如：研究方向" value="偏好"><textarea id="memoryContent" maxlength="1200" required placeholder="例如：我刚读研一，正在学习机器学习基础。"></textarea><button class="hub-primary" type="submit">保存记忆</button></form>
         <div id="memoryList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
       </section>
-      <section class="learning-section"><h3>任务规划</h3><p class="learning-help">写下目标，千问会生成可勾选待办；完成后可按进度重新规划。</p>
+      <section class="learning-section"><h3>任务规划</h3><p class="learning-help">写下目标，当前模型会生成可勾选待办；完成后可按进度重新规划。</p>
         <form id="planForm" onsubmit="generateLearningPlan(event)"><textarea id="planGoal" maxlength="1000" required placeholder="例如：一周内理解 Transformer 的基本结构和注意力机制"></textarea><button class="hub-primary" id="generatePlanBtn" type="submit">生成任务计划</button></form>
         <div id="planList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
+      </section>
+    </div>
+  </dialog>
+  <dialog id="modelSettings" class="learning-hub">
+    <div class="learning-head"><div><span class="eyebrow">MODEL PROVIDERS</span><h2>模型与 API Key</h2><p>保存后随时切换，对话、论文、学习计划都会立刻改用选中的服务商。Key 只写入本机数据库，页面上只显示后四位。</p></div><button class="hub-close" onclick="closeModelSettings()" aria-label="关闭">×</button></div>
+    <div class="learning-grid">
+      <section class="learning-section"><h3>已配置</h3><p class="learning-help">点「使用」切换当前模型；「测试」会发一次极短的真实请求，用来确认 Key、地址和模型名是否对得上。</p>
+        <div id="providerList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
+      </section>
+      <section class="learning-section"><h3>添加 / 编辑</h3><p id="providerHint" class="learning-help">选一个预设会自动填好接口地址和默认模型，其余可以自己改。</p>
+        <form id="providerForm" onsubmit="saveProvider(event)">
+          <input type="hidden" id="providerId">
+          <select id="providerPreset" onchange="applyProviderPreset()" aria-label="服务商预设"></select>
+          <input id="providerName" maxlength="40" placeholder="显示名称，例如：我的 DeepSeek">
+          <input id="providerBaseUrl" maxlength="300" placeholder="接口地址，例如 https://api.deepseek.com/v1">
+          <input id="providerKey" type="password" autocomplete="off" maxlength="400" placeholder="API Key">
+          <input id="providerModel" maxlength="120" placeholder="对话模型，例如 deepseek-chat">
+          <input id="providerVisionModel" maxlength="120" placeholder="视觉模型（可空），例如 qwen3-vl-plus">
+          <div class="provider-actions">
+            <button class="hub-primary" id="providerSaveBtn" type="submit">保存服务商</button>
+            <button class="hub-secondary" type="button" onclick="testProviderDraft()">测试连接</button>
+            <button class="hub-secondary" type="button" onclick="resetProviderForm()">新建</button>
+          </div>
+        </form>
+        <div id="providerStatus" class="provider-status" hidden></div>
       </section>
     </div>
   </dialog>

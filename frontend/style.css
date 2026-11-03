@@ -25,3 +25,22 @@
 .send-button.stopping{background:#b4595c}
 .send-button.stopping:hover{background:#c26a6c}
 .send-button.stopping .send-arrow{font-size:9px}
+
+/* 模型与 API Key 面板 */
+.model-pill{background:#fff;cursor:pointer;font:inherit;color:#686e79}
+.model-pill:hover{border-color:#d7daf0;background:#fafaff;color:#4d5563}
+.model-pill.warn{border-color:#f0dada;background:#fff7f7;color:#a84949}
+.model-pill.warn .model-dot{background:#d76c6c}
+.learning-section select{width:100%;padding:10px 11px;border:1px solid #e6e8ed;border-radius:8px;background:#fff;color:#303641;font-size:12px}
+.provider-item.active{border-color:#dfe3f7;background:#fbfbff}
+.provider-title{display:flex;align-items:center;gap:8px;color:#3a4150;font-size:12px}
+.provider-badge{padding:2px 7px;border-radius:20px;background:#eef0fa;color:#5c66b8;font-size:9px}
+.provider-meta{margin:6px 0 0;color:#8a909c;font-size:10px;line-height:1.6;overflow-wrap:anywhere}
+.provider-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:4px}
+.hub-secondary{padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;background:#fff;color:#5d6472;font-size:11px}
+.hub-secondary:hover{border-color:#cfd3e6;background:#fafaff}
+.provider-status{margin-top:10px;padding:8px 10px;border:1px solid #e9ebf1;border-radius:8px;background:#f8f9fb;color:#6f7683;font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+.provider-status.ok{border-color:#d9ecdf;background:#f4faf5;color:#4a8059}
+.provider-status.error{border-color:#f3dada;background:#fff7f7;color:#aa5353}
+.hub-item-actions button.danger{color:#a35f66}
+@media(max-width:600px){.model-pill{max-width:112px}.model-pill #modelPillText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}

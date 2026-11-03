@@ -1060,6 +1060,16 @@ function finalizeStream(box, statusLine, answer, event, buffer, question) {
 
         box.appendChild(note);
 
+    } else if (event.status === "error") {
+
+        const note = document.createElement("div");
+
+        note.className = "stream-error";
+
+        note.textContent = "本次回答未完成。可以到右上角「模型与 API Key」检查配置后重试。";
+
+        box.appendChild(note);
+
     }
 
     const titleEl = $("currentTitle");
@@ -2220,6 +2230,7 @@ function enterWorkspace() {
     loadChats();
     loadFiles();
     checkBackendHealth();
+    refreshModelPill();
 }
 
 async function checkAuthentication() {
@@ -2544,6 +2555,339 @@ async function generateLearningPlan(event) {
     } finally {
         button.disabled = false;
         button.textContent = "生成任务计划";
+    }
+}
+
+// =============================
+// 二十一、模型与 API Key
+// =============================
+// 服务商配置存在后端 SQLite，前端只拿到掩码后的 Key。
+// 切换后不用刷新页面：后端每次调用都会重新读取当前激活项。
+
+let providers = [];
+let providerPresets = [];
+
+function currentPreset() {
+    const select = $("providerPreset");
+    return providerPresets.find(item => item.id === (select?.value || "")) || null;
+}
+
+function setProviderStatus(message, type = "") {
+    const box = $("providerStatus");
+    if (!box) return;
+    if (!message) {
+        box.hidden = true;
+        box.textContent = "";
+        box.className = "provider-status";
+        return;
+    }
+    box.hidden = false;
+    box.className = "provider-status" + (type ? " " + type : "");
+    box.textContent = message;
+}
+
+function updateModelPill(active) {
+    const pill = $("modelPill");
+    const label = $("modelPillText");
+    if (!label) return;
+    if (!active) {
+        label.textContent = "配置模型";
+        pill?.classList.add("warn");
+        if (pill) pill.title = "还没有配置可用的 API Key，点击添加";
+        return;
+    }
+    pill?.classList.remove("warn");
+    label.textContent = active.model || active.name;
+    if (pill) pill.title = `${active.name} · ${active.model}\n点击切换模型或修改 API Key`;
+}
+
+async function refreshModelPill() {
+    try {
+        const data = await apiJson("/models");
+        updateModelPill(data.active);
+    } catch (_) {
+        // 顶栏提示失败不影响任何功能，等用户打开面板时再报错
+    }
+}
+
+function renderPresetOptions() {
+    const select = $("providerPreset");
+    if (!select) return;
+    const keep = select.value;
+    select.replaceChildren();
+    providerPresets.forEach(item => {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.name;
+        select.appendChild(option);
+    });
+    if (keep && providerPresets.some(item => item.id === keep)) select.value = keep;
+    else if (providerPresets.length) select.value = providerPresets[0].id;
+}
+
+function applyProviderPreset() {
+    const preset = currentPreset();
+    if (!preset) return;
+    if ($("providerHint")) $("providerHint").textContent = preset.hint || "";
+    const nameInput = $("providerName");
+    // 只在名字为空、或还是别的预设默认名时才覆盖，避免冲掉用户自己的命名
+    if (nameInput && (!nameInput.value.trim() || providerPresets.some(item => item.name === nameInput.value.trim()))) {
+        nameInput.value = preset.name;
+    }
+    if ($("providerBaseUrl")) $("providerBaseUrl").value = preset.base_url || "";
+    if ($("providerModel")) $("providerModel").value = preset.model || "";
+    if ($("providerVisionModel")) $("providerVisionModel").value = preset.vision_model || "";
+}
+
+function resetProviderForm() {
+    if ($("providerId")) $("providerId").value = "";
+    if ($("providerName")) $("providerName").value = "";
+    if ($("providerBaseUrl")) $("providerBaseUrl").value = "";
+    if ($("providerModel")) $("providerModel").value = "";
+    if ($("providerVisionModel")) $("providerVisionModel").value = "";
+    if ($("providerKey")) {
+        $("providerKey").value = "";
+        $("providerKey").placeholder = "API Key";
+    }
+    if ($("providerSaveBtn")) $("providerSaveBtn").textContent = "保存服务商";
+    const select = $("providerPreset");
+    if (select && providerPresets.length) select.value = providerPresets[0].id;
+    applyProviderPreset();
+    setProviderStatus("");
+}
+
+function editProvider(id) {
+    const item = providers.find(entry => entry.id === id);
+    if (!item) return;
+    if ($("providerId")) $("providerId").value = String(item.id);
+    const select = $("providerPreset");
+    if (select) select.value = item.provider || "custom";
+    if ($("providerName")) $("providerName").value = item.name || "";
+    if ($("providerBaseUrl")) $("providerBaseUrl").value = item.base_url || "";
+    if ($("providerModel")) $("providerModel").value = item.model || "";
+    if ($("providerVisionModel")) $("providerVisionModel").value = item.vision_model || "";
+    if ($("providerKey")) {
+        $("providerKey").value = "";
+        $("providerKey").placeholder = item.key_hint
+            ? "留空表示不修改当前 Key（" + item.key_hint + "）"
+            : "API Key";
+    }
+    if ($("providerSaveBtn")) $("providerSaveBtn").textContent = "保存修改";
+    if ($("providerHint")) {
+        const preset = providerPresets.find(entry => entry.id === item.provider);
+        $("providerHint").textContent = preset?.hint || "留空的地方表示保持不变。";
+    }
+    setProviderStatus("");
+}
+
+function renderProviderList() {
+    const box = $("providerList");
+    if (!box) return;
+    box.replaceChildren();
+    if (!providers.length) {
+        box.innerHTML = '<div class="empty-hint">还没有配置。右侧选一个预设，填上 Key 保存即可。</div>';
+        return;
+    }
+    providers.forEach(item => {
+        const card = document.createElement("article");
+        card.className = "hub-item provider-item" + (item.is_active ? " active" : "");
+
+        const title = document.createElement("div");
+        title.className = "provider-title";
+        const name = document.createElement("strong");
+        name.textContent = item.name;
+        title.appendChild(name);
+        if (item.is_active) {
+            const badge = document.createElement("span");
+            badge.className = "provider-badge";
+            badge.textContent = "使用中";
+            title.appendChild(badge);
+        }
+
+        const meta = document.createElement("p");
+        meta.className = "provider-meta";
+        meta.textContent = [
+            item.model,
+            item.vision_model ? "视觉 " + item.vision_model : "",
+            item.key_hint || "未填 Key",
+        ].filter(Boolean).join(" · ");
+
+        const actions = document.createElement("div");
+        actions.className = "hub-item-actions";
+
+        if (!item.is_active) {
+            const use = document.createElement("button");
+            use.type = "button";
+            use.textContent = "使用";
+            use.addEventListener("click", () => activateProvider(item.id));
+            actions.appendChild(use);
+        }
+
+        const test = document.createElement("button");
+        test.type = "button";
+        test.textContent = "测试";
+        test.addEventListener("click", () => testProviderSaved(item.id));
+        actions.appendChild(test);
+
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.textContent = "编辑";
+        edit.addEventListener("click", () => editProvider(item.id));
+        actions.appendChild(edit);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger";
+        remove.textContent = "删除";
+        remove.addEventListener("click", () => deleteProvider(item.id));
+        actions.appendChild(remove);
+
+        card.append(title, meta, actions);
+        box.appendChild(card);
+    });
+}
+
+async function loadProviders() {
+    try {
+        const data = await apiJson("/models");
+        providers = data.providers || [];
+        providerPresets = data.presets || [];
+        renderPresetOptions();
+        renderProviderList();
+        updateModelPill(data.active);
+        return data;
+    } catch (error) {
+        const box = $("providerList");
+        if (box) box.innerHTML = '<div class="empty-hint">加载失败：' + escapeHtml(error.message) + "</div>";
+        return null;
+    }
+}
+
+async function openModelSettings() {
+    const dialog = $("modelSettings");
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    const data = await loadProviders();
+    resetProviderForm();
+    // loadProviders 之后再 reset：先把预设列表填好，reset 才能选中第一项
+    return data;
+}
+
+function closeModelSettings() {
+    const dialog = $("modelSettings");
+    if (dialog?.open) dialog.close();
+}
+
+async function saveProvider(event) {
+    event.preventDefault();
+    const button = $("providerSaveBtn");
+    const id = $("providerId")?.value || "";
+    const preset = currentPreset();
+    const payload = {
+        provider: preset ? preset.id : "custom",
+        name: ($("providerName")?.value || "").trim() || (preset ? preset.name : "自定义"),
+        base_url: ($("providerBaseUrl")?.value || "").trim(),
+        api_key: ($("providerKey")?.value || "").trim(),
+        model: ($("providerModel")?.value || "").trim(),
+        vision_model: ($("providerVisionModel")?.value || "").trim()
+    };
+
+    if (!payload.base_url || !payload.model) {
+        setProviderStatus("接口地址和模型名都要填。", "error");
+        return;
+    }
+    if (!id && !payload.api_key) {
+        setProviderStatus("新增服务商必须填写 API Key。", "error");
+        return;
+    }
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "保存中…";
+    }
+    try {
+        const data = await apiJson(id ? "/models/" + id : "/models", {
+            method: id ? "PATCH" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        await loadProviders();
+        resetProviderForm();
+        if (data && data.provider) {
+            setProviderStatus("已保存：" + data.provider.name + " · " + data.provider.model, "ok");
+        }
+    } catch (error) {
+        setProviderStatus(error.message || "保存失败", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = $("providerId")?.value ? "保存修改" : "保存服务商";
+        }
+    }
+}
+
+async function runProviderTest(payload) {
+    setProviderStatus("正在测试连接…");
+    try {
+        const data = await apiJson("/models/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (data.ok) {
+            setProviderStatus(data.message || "连接正常", "ok");
+        } else {
+            setProviderStatus(data.message || "连接失败", "error");
+        }
+    } catch (error) {
+        setProviderStatus(error.message || "连接失败", "error");
+    }
+}
+
+function testProviderDraft() {
+    const id = $("providerId")?.value || "";
+    const model = ($("providerModel")?.value || "").trim();
+    if (!model) {
+        setProviderStatus("先填模型名再测试。", "error");
+        return;
+    }
+    runProviderTest({
+        provider_id: id ? Number(id) : null,
+        base_url: ($("providerBaseUrl")?.value || "").trim(),
+        api_key: ($("providerKey")?.value || "").trim(),
+        model
+    });
+}
+
+async function testProviderSaved(id) {
+    const item = providers.find(entry => entry.id === id);
+    if (!item) return;
+    await openModelSettings();
+    editProvider(id);
+    runProviderTest({ provider_id: id, base_url: item.base_url, api_key: "", model: item.model });
+}
+
+async function activateProvider(id) {
+    try {
+        const data = await apiJson("/models/" + id + "/activate", { method: "POST" });
+        updateModelPill(data.active);
+        await loadProviders();
+        setProviderStatus("已切换到 " + ((data.active && data.active.model) || "新模型"), "ok");
+    } catch (error) {
+        setProviderStatus("切换失败：" + (error.message || "未知错误"), "error");
+    }
+}
+
+async function deleteProvider(id) {
+    const item = providers.find(entry => entry.id === id);
+    if (!confirm("删除「" + ((item && item.name) || "该服务商") + "」？已保存的 Key 会一起删除。")) return;
+    try {
+        const data = await apiJson("/models/" + id, { method: "DELETE" });
+        if (data.active) updateModelPill(data.active);
+        await loadProviders();
+        setProviderStatus("已删除", "ok");
+    } catch (error) {
+        setProviderStatus("删除失败：" + (error.message || "未知错误"), "error");
     }
 }
 
