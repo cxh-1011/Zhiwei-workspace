@@ -37,7 +37,7 @@ flowchart TD
     DB --> U
 ```
 
-Agent 工具提供搜索、资料检索、学习档案写入、工作区读取与工作区改动，仍然**没有任意 Python 执行、Shell 命令执行**能力。档案写入工具默认不注册，需用户显式开启「允许助手记录」；工作区读取工具需开启「允许读代码」；工作区写入工具需开启「允许改代码」，且每次落盘前都会备份、可整轮撤销。三条工作区边界共用 `backend/tools/_guard.py`：路径必须在工作区内、红线路径直接拒绝、二进制与超大文件不按文本处理。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。
+Agent 工具提供搜索、资料检索、学习档案写入、工作区读取与工作区改动，仍然**没有任意 Python 执行、Shell 命令执行**能力。档案写入工具默认不注册，需用户显式开启「允许助手记录」；工作区读取工具需开启「允许读代码」；工作区写入工具需开启「允许改代码」，且每次落盘前都会备份、可整轮撤销。三条工作区边界共用 `backend/tools/_guard.py`：路径必须在工作区内、红线路径直接拒绝、二进制与超大文件不按文本处理。工具调用有轮次、单轮工具数量、总耗时、上下文字符数和 token 预算限制，具体值可在环境变量中调整，并受代码硬上限约束。预算是**两档**的：普通问答 5 轮 / 单轮 3 个工具 / 60 秒 / 12k token；勾选「允许改代码」后自动放宽到 20 轮 / 单轮 6 个工具 / 300 秒 / 60k token——读文件、改一处、核对 diff、再返工，5 轮走不完一个来回。
 
 ## 技术栈
 
@@ -79,6 +79,7 @@ Agent 工具提供搜索、资料检索、学习档案写入、工作区读取�
 │   ├── test_thinking.py        # 思考过程、轮次事件与参数降级的离线测试
 │   ├── test_repo_tools.py      # 路径沙箱、仓库地图、git 三件套的离线测试
 │   ├── test_redlines.py        # 红线分类、二进制识别、体积上限、写入侧拦截的离线测试
+│   ├── test_budget.py          # 两档预算、环境变量夹取、轮次跑满、上下文裁剪的离线测试
 │   ├── test_edit_tools.py      # 写入工具的沙箱、锚点、备份、预算与撤销测试
 │   ├── test_providers.py       # 服务商切换、Key 掩码、视觉降级的离线测试
 │   ├── test_model_api.py       # 模型配置接口的鉴权与 CRUD 测试
@@ -153,12 +154,19 @@ cp ../.env.example .env
 | `AGENT_MODEL` | 可选 | 用 `.env` 播种默认服务商时的模型名，默认 `qwen-plus`；页面上的配置优先 |
 | `AGENT_VISION_MODEL` | 可选 | 同上，默认 `qwen3-vl-plus`，用于图片问答 |
 | `DASHSCOPE_BASE_URL` | 可选 | 用 `.env` 播种默认服务商时的接口地址 |
-| `AGENT_MAX_ROUNDS` | 可选 | Agent 最多调用模型的轮数，默认 5，代码硬上限 8 |
 | `AGENT_WORKSPACE` | 可选 | 工作区读写工具的根目录，留空则用项目根目录；该目录外与配置/密钥/数据库/依赖/备份目录一律不可访问。写入备份落在其下的 `backups/agent-edits/` |
-| `AGENT_MAX_TOOL_CALLS_PER_ROUND` | 可选 | 每轮最多执行的工具数，默认 3，代码硬上限 5 |
-| `AGENT_TOTAL_TIMEOUT` | 可选 | 单次 Agent 总耗时秒数，默认 60，代码硬上限 180 |
-| `AGENT_MAX_CONTEXT_CHARS` | 可选 | Agent 上下文字符预算，默认 24000 |
-| `AGENT_MAX_TOKENS_PER_RUN` | 可选 | 单次运行 token 预算，默认 12000 |
+| `AGENT_MAX_ROUNDS` | 可选 | 问答模式最多调用模型的轮数，默认 5，代码硬上限 8 |
+| `AGENT_MAX_TOOL_CALLS_PER_ROUND` | 可选 | 问答模式每轮最多执行的工具数，默认 3，代码硬上限 5 |
+| `AGENT_TOTAL_TIMEOUT` | 可选 | 问答模式单次 Agent 总耗时秒数，默认 60，代码硬上限 180 |
+| `AGENT_LLM_TIMEOUT` | 可选 | 问答模式单次模型调用超时，默认 30 秒 |
+| `AGENT_MAX_CONTEXT_CHARS` | 可选 | 问答模式上下文字符预算，默认 24000 |
+| `AGENT_MAX_TOKENS_PER_RUN` | 可选 | 问答模式单次运行 token 预算，默认 12000 |
+| `AGENT_CODE_MAX_ROUNDS` | 可选 | 勾选「允许改代码」时的轮数，默认 20，代码硬上限 30 |
+| `AGENT_CODE_MAX_TOOL_CALLS_PER_ROUND` | 可选 | 改代码时每轮工具数，默认 6，代码硬上限 10 |
+| `AGENT_CODE_TOTAL_TIMEOUT` | 可选 | 改代码时总耗时秒数，默认 300，代码硬上限 600 |
+| `AGENT_CODE_LLM_TIMEOUT` | 可选 | 改代码时单次模型调用超时，默认 60 秒 |
+| `AGENT_CODE_MAX_CONTEXT_CHARS` | 可选 | 改代码时上下文字符预算，默认 60000 |
+| `AGENT_CODE_MAX_TOKENS_PER_RUN` | 可选 | 改代码时 token 预算，默认 60000 |
 | `AGENT_MAX_OUTPUT_TOKENS` | 可选 | 单次模型输出 token 上限，默认 1800 |
 
 可用以下命令生成密码哈希和随机签名密钥，再把结果写入 `backend/.env`：
