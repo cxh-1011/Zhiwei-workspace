@@ -2,15 +2,15 @@
 
 ## 对话与工具
 
-- `POST /chat` 是统一聊天入口，接受 `mode`：`chat`、`file`、`paper`，以及 `allow_writes`、`allow_workspace`、`allow_code_edit`、`show_thinking`。
+- `POST /chat` 是统一聊天入口，接受 `mode`：`chat`、`file`、`paper`，以及 `allow_writes`、`allow_workspace`、`allow_code_edit`、`allow_command`、`show_thinking`。
 - 千问通过 DashScope OpenAI 兼容接口 Function Calling 选择工具。
 - 工具都在 `backend/tools/` 注册：`web_search`、`scholarly_search`、`paper_search`、`search_uploaded_files`、`list_uploaded_files`。
 - `scholarly_search` 实时查询 Semantic Scholar 与 Crossref 的学术元数据，返回题名、作者、年份、摘要、DOI 和可用的开放获取链接。它不登录或抓取知网、IEEE Xplore、ScienceDirect，也不绕过付费全文权限。可选配置 `SEMANTIC_SCHOLAR_API_KEY` 提高 Semantic Scholar API 使用能力，`CROSSREF_MAILTO` 用于 Crossref polite pool。
-- 工具做搜索、检索、只读的代码与 git 查看、「学习档案写入」，以及（显式开启后）工作区文件写入；仍然**没有任意 Python 或 Shell 执行**能力。
+- 工具做搜索、检索、只读的代码与 git 查看、「学习档案写入」，以及（显式开启后）工作区文件写入与受限命令执行。命令执行不经 shell、三档分类、需确认的命令挂起等用户点选，详见[命令执行](#命令执行)。
 - 工具结果会回给千问；它可以继续调用工具，或生成最终回答。
 - 文件问答支持 TXT、PDF、DOCX，以及 JPG、JPEG、PNG、WEBP 图片。图片（最大 10 MB）作为 Base64 视觉输入发送给配置的 `AGENT_VISION_MODEL`，默认 `qwen3-vl-plus`；图像问答不走文本切片检索。
-- 预算是**两档**的：普通问答 5 轮 / 单轮 3 个工具 / 60 秒 / 24,000 字符 / 12,000 tokens；勾选「允许改代码」后自动切到 20 轮 / 单轮 6 个工具 / 300 秒 / 60,000 字符 / 60,000 tokens。
-- 预算集中在 `agent.py` 的 `Budget` 类：`CHAT_BUDGET` / `CODE_BUDGET` 两个实例，由 `budget_for(allow_code_edit)` 选择。环境变量只在代码内的上下界之间可调，`start` 事件把整套预算带给前端，UI 不硬编码任何数字。
+- 预算是**两档**的：普通问答 5 轮 / 单轮 3 个工具 / 60 秒 / 24,000 字符 / 12,000 tokens；勾选「允许改代码」或「允许跑命令」后自动切到 20 轮 / 单轮 6 个工具 / 300 秒 / 60,000 字符 / 60,000 tokens。
+- 预算集中在 `agent.py` 的 `Budget` 类：`CHAT_BUDGET` / `CODE_BUDGET` 两个实例，由 `budget_for(allow_code_edit or allow_command)` 选择。环境变量只在代码内的上下界之间可调，`start` 事件把整套预算带给前端，UI 不硬编码任何数字。
 - `_fit_context()` 裁剪历史时**钉住第一条 user 消息**。早期版本只从后往前装，最近几轮的工具体积一旦就超过上限，`kept_groups` 会是空的，整段上下文只剩 system —— 模型拿不到问题只能乱答。改代码模式单轮工具结果 6000 字符、最多 6 个，很容易踩到。
 - 聊天历史保留最近 12 条供短期上下文使用。论文检索仍使用当前 FAISS 论文索引；重新上传论文会替换当前索引。
 
@@ -26,6 +26,8 @@
 | `token` | 模型输出的文本片段 | 追加到回答区（纯文本，用 rAF 合并重绘） |
 | `tool_start` | 即将调用工具，带工具名与参数 | 过程面板插入工具条目，状态为执行中 |
 | `file_edit` | 写入类工具落盘成功，带 `path` / `added` / `removed` / `diff` | 在对应工具条目里展开红绿 diff（该事件排在 `tool_end` 之前，才能挂到刚建的条目上） |
+| `command_ask` | 有命令等待确认，带 `command` / `reason` / `cwd` / `wait_seconds` / `approval_id` | 过程面板里插入确认卡片，两个按钮回 `POST /chat/approve/{run_id}` |
+| `command_verdict` | 审批结果 `approved` / `denied` / `timeout` / `cancelled` | 卡片变成已允许/已拒绝，非用户点选的结果（超时、取消）也在这里回写 |
 | `tool_end` | 工具返回，带 `ok` / 耗时 / 结果摘要 | 条目打勾并显示耗时与结果摘要 |
 | `limit` | 触发某个预算上限或用户停止 | 面板标题显示具体原因 |
 | `error` | 模型调用或执行异常 | 面板内插入红色错误条目 |
@@ -134,6 +136,41 @@ cd backend
 - 备份只增不删，`backups/` 已在 `.gitignore` 中，不影响版本库；需要清理时按目录手工删除即可。
 
 回归测试见 `backend/test_edit_tools.py`（71 项，全部在临时工作区里跑，不碰仓库真实文件）。
+
+## 命令执行
+
+`run_command` 让 Agent 从「能改」变成「能验证」。默认关闭，`allow_command` 独立于 `allow_code_edit`：能改文件不等于能执行东西。
+
+**定位**：不是沙箱。命令在用户权限下跑真实进程，能读写用户能读写的一切。它降低误伤，不提供安全边界。
+
+```
+classify_command(command, cwd)
+  ├─ deny  → 破坏性/外联/起外壳：rm、mv、cp、curl、chmod、sudo、powershell、bash、find -delete
+  │          含 shell 元字符：| > < && ; ` 换行
+  │          参数里出现红线路径：.env、*.db、私钥
+  ├─ ask   → 装依赖、构建、python -c、python -m <非测试模块>、git 写操作、未知命令
+  └─ auto  → python -m pytest/unittest、python <工作区内脚本>、只读 git、ls/cat/head
+```
+
+实现要点：
+
+- **自己分词**，不启 shell。Windows 下 `shlex(posix=False)` 会把引号留在 token 里、`posix=True` 又会吃掉反斜杠路径，所以用 30 行的状态机：按空白切分、支持引号、遇到 `| > < & ;` 与反引号直接报错。引号内的字符不算元字符，`pytest -k "a and b"` 照常能用。
+- **分类要看 cwd**。`python helper.py` 在 `cwd=src` 时指向 `src/helper.py`；不带 cwd 去解析会把正常命令误判成「脚本不存在」而要求确认——这个 bug 是第一次跑测试时发现的。
+- **解释器归一**。`python` / `python3` / `pytest` 一律换成当前 `sys.executable`，否则会调到一个没装依赖的系统 Python，报错信息还跟项目无关。
+- **环境变量脱敏**：启动前剔除名字含 `KEY`/`TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL` 的变量，并设 `PYTHONUTF8=1`、`GIT_PAGER=cat`、`GIT_TERMINAL_PROMPT=0`。不剔除的话，一句 `print(os.environ)` 就能把 Key 抄进上下文。
+- **杀进程树**：Windows `taskkill /F /T /PID`，POSIX `killpg`。只杀父进程会留下孤儿——测试框架、构建工具都会拉子进程。
+- **输出采集有上限**：独立读线程最多采 40 KB，主线程 50ms 轮询退出码、取消标记与超时。回传时保留头 2600 + 尾 1600 字符，因为失败摘要都在尾部。
+- **退出码非零不算工具故障**：命令确实跑完了，只是它自己失败。`ok=True`，退出码写在正文头部，输出原样回给模型定位问题；只有拒绝、超时、启动失败才算 `ok=False`。
+- **重复调用检测对命令放行**。检索类工具重复搜同一个词没有新信息，但「改完代码重跑同一条测试」是最正确的动作——第一版拦掉了它，实测模型被迫去掉 `-v` 再跑一次，白烧一轮。
+
+审批链路（`agent.py`）：
+
+- `_APPROVALS` 是内存字典，`approval_id → {run_id, Event, allow}`，生命周期只有一次请求。
+- 生成器 `yield command_ask` 后调 `_wait_approval`，内部按 0.25 秒轮询 `Event`，同时检查取消标记与超时。不直接阻塞 `Event.wait(timeout)`，是因为那样点「停止」要等满 120 秒才生效。
+- `POST /chat/approve/{run_id}` 按「运行号 + 审批号」双键校验，跨运行点不动；超时后条目已移除，接口返回 404 而不是悄悄放行。
+- 被拒绝时回给模型的话里明确写「不要原样重试」。不写这句，它会换个参数重试同一条命令。
+
+回归测试见 `backend/test_command_tools.py`（100 项）。
 
 ## 部署
 
