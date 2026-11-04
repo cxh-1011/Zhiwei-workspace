@@ -1279,8 +1279,9 @@ function liveCommandVerdict(trace, event) {
 function liveNote(trace, text, kind) {
     if (!trace) return;
     liveSetStatus(trace, text, false);
-    // 限制类提示已经显示在上面一行了，正文里不再重复；错误要留在列表里方便回看
-    if (kind !== "error") return;
+    // 限制类提示已经显示在上面一行了，正文里不再重复；错误和「被退回自测」要留痕，
+    // 因为它们解释了「为什么回答还没结束」。
+    if (kind !== "error" && kind !== "verify") return;
     const row = document.createElement("div");
     row.className = "trace-live-note" + (kind ? " " + kind : "");
     row.textContent = text;
@@ -1494,6 +1495,28 @@ function finalizeStream(box, live, answer, event, buffer, question) {
 
     }
 
+    // 自测回路：改过代码却没有一条命令跑成功。这不算失败，但结论不能当验证过用，
+    // 所以在回答下面挂一条明确警示，而不是让模型自己一句「应该没问题」带过去。
+    const selfCheck = event.self_check;
+
+    if (selfCheck && selfCheck.pending) {
+
+        const files = selfCheck.edited || [];
+
+        const shown = files.slice(0, 3).join("、") + (files.length > 3 ? " 等" : "");
+
+        const warn = document.createElement("div");
+
+        warn.className = "verify-warn";
+
+        warn.textContent = "未验证：" + files.length + " 个代码文件已改动"
+            + (shown ? "（" + shown + "）" : "")
+            + "，但没有检测到成功的命令。可用性请自行确认后再使用。";
+
+        box.appendChild(warn);
+
+    }
+
     if (event.status === "cancelled") {
 
         const note = document.createElement("div");
@@ -1666,6 +1689,14 @@ async function sendMessage() {
 
                     case "todos":
                         liveTodos(live, event);
+                        break;
+
+                    // 改了代码却一条命令都没跑通，后端把「收尾」退回去了。
+                    // 已经流出来的那版是草稿：清掉 buffer，最终只保留验证后的回答，
+                    // 否则正文里会出现「初稿 + 正式回答」两段重复内容。
+                    case "verify_required":
+                        liveNote(live, "改动还没验证，已要求先跑一条测试", "verify");
+                        buffer = "";
                         break;
 
                     case "tool_end":
@@ -1936,6 +1967,13 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen, runId) {
                 item.appendChild(think);
             }
 
+        } else if (step.kind === "verify_gate") {
+            title.textContent = "改动未验证，退回要求先跑测试";
+            item.className = "trace-verify";
+            item.appendChild(title);
+            const reason = document.createElement("p");
+            reason.textContent = step.detail || "改了代码，但没有一条命令跑成功。";
+            item.appendChild(reason);
         } else if (step.kind === "limit") {
             title.textContent = "达到保护限制";
             item.className = "trace-limit";
