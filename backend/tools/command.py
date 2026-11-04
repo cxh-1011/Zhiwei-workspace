@@ -230,7 +230,10 @@ def _classify_python(rest: list[str], cwd: str = ".") -> tuple[str, str]:
     first = rest[0]
     if first == "-m" and len(rest) >= 2:
         module = rest[1]
-        if module in ("pytest", "unittest"):
+        # compileall / py_compile 只把源码编译一遍，不执行其中的代码，是「验证语法
+        # 有没有坏」最便宜的手段。自测回路要求模型跑一条验证命令，如果连它们都要
+        # 等人点确认，无人值守时整条回路就卡在审批上——实测两轮各等满 120 秒。
+        if module in ("pytest", "unittest", "compileall", "py_compile"):
             return "auto", ""
         return "ask", "python -m %s 会执行任意模块，需要你确认" % module
     if first in ("-c", "-"):

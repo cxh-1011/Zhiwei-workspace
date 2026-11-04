@@ -12,6 +12,7 @@ from llm import ModelConfigError, chat_completion_stream
 from tools import all_schemas, get_tool
 from tools.base import ToolResult
 from tools.command import classify_command
+from selfcheck import SelfCheck
 import tools as registered_tools  # noqa: F401
 
 logger = logging.getLogger("ai_robot.agent")
@@ -391,6 +392,9 @@ def run_agent_stream(
         "allow_code_edit": allow_code_edit, "allow_command": allow_command,
         # 用户批准过的命令原文：run_command 内部会再核对一次，防绕过
         "approved_commands": set(),
+        # 有一条命令等确认超时后置 True：本次运行不再发起新的确认，
+        # 免得人离开时每条 ask 级命令都白等满 APPROVAL_TIMEOUT。
+        "approval_unavailable": False,
     }
     prompt = SYSTEM_PROMPT
     if mode == "file":
@@ -500,6 +504,10 @@ def run_agent_stream(
     # 落库和 done 都用它拼出的完整文本，避免「刷新后回答变短」。
     visible_parts: list[str] = []
     seen_calls: set[str] = set()
+    # 自测回路的状态：记着改了哪些代码、之后跑过什么命令、有没有跑成功过。
+    # 只在 agent 层维护，因为它是跨调用的状态，单个工具看不见。
+    # 定义在 try 之前——异常也会走到 done 事件，那里要读它。
+    check = SelfCheck()
     should_stop = lambda: is_cancelled(run_id)  # noqa: E731
     # 让 run_command 在命令执行期间也能感知「停止」：否则一条 60 秒的命令
     # 会把「停止」按钮晾在那儿直到超时。
@@ -567,20 +575,24 @@ def run_agent_stream(
                 steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {budget.tokens}"})
                 yield {"type": "limit", "reason": f"已达本次 token 预算上限（{budget.tokens}）"}
                 break
-            # 系统提示每轮按原样重算，再把「进度提醒」拼在末尾：
-            # 这不是新增长期指令，只是本轮的一次催促，清掉就回到原始提示词。
+            # 系统提示每轮按原样重算，再把「本轮催促」拼在末尾：
+            # 这不是新增长期指令，只是这一轮的一次提醒，清掉就回到原始提示词。
+            nudges: list[str] = []
             open_todos = [item for item in (context.get("todos") or []) if item.get("status") != "done"]
             if open_todos and todo_idle >= 2:
                 doing = next((item["text"] for item in open_todos if item["status"] == "active"), "")
                 total_todos = len(context["todos"])
                 done_todos = total_todos - len(open_todos)
-                messages[0]["content"] = prompt + (
+                nudges.append(
                     "\n\n【进度提醒】任务清单当前 %d/%d 完成%s。如果刚才那一步已经办完，"
                     "现在就调用 update_todos 把它标成 done，再做下一步；不要等全部做完才更新。"
                     % (done_todos, total_todos, "，正在做「%s」" % doing if doing else "")
                 )
-            else:
-                messages[0]["content"] = prompt
+            # 改过代码但没跑成功过命令：每轮都提一次，而不是等它说「已完成」才补救。
+            # 提前说比事后拦便宜——拦一次要多花一整轮上下文。
+            if check.should_interrupt(allow_command):
+                nudges.append(check.reminder())
+            messages[0]["content"] = prompt + "".join(nudges)
 
             remaining = deadline - time.monotonic()
             if remaining <= 1:
@@ -654,7 +666,23 @@ def run_agent_stream(
 
             calls = turn.get("tool_calls") or []
             if not calls:
-                reply = turn.get("content") or "（模型未返回文本）"
+                content = turn.get("content") or "（模型未返回文本）"
+                # 自测回路：改了代码却连一条成功的命令都没有，就把这次「收尾」退回去。
+                # 只拦一次——用户拒绝审批、项目确实没有测试时它也无能为力，
+                # 拦第二次就只是拿轮次和时间换一个同样的回答说。
+                if check.should_interrupt(allow_command):
+                    check.interrupted = True
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": check.interrupt_prompt()})
+                    # 这一版是草稿：用户已经在流里看到过，但它不该进最终回答和历史记录，
+                    # 否则会出现「初稿 + 正式回答」两段重复内容。
+                    visible_parts.clear()
+                    steps.append({"kind": "verify_gate", "round_no": round_no,
+                                  "detail": "改动未经命令验证，已退回要求先跑一条测试"})
+                    yield {"type": "verify_required", "round": round_no,
+                           "files": sorted(check.code_edits)}
+                    continue
+                reply = content
                 steps.append({"kind": "final", "round_no": round_no})
                 break
 
@@ -711,41 +739,66 @@ def run_agent_stream(
                             tier, why = classify_command(
                                 command_text, str(arguments.get("cwd") or "."))
                             if tier == "ask":
-                                approval_id = uuid.uuid4().hex[:12]
-                                wait_seconds = int(min(APPROVAL_TIMEOUT,
-                                                        max(5.0, deadline - time.monotonic())))
-                                yield {
-                                    "type": "command_ask", "run_id": run_id,
-                                    "approval_id": approval_id, "tool": name,
-                                    "command": command_text,
-                                    "cwd": str(arguments.get("cwd") or "."),
-                                    "reason": why, "wait_seconds": wait_seconds,
-                                }
-                                verdict = _wait_approval(run_id, approval_id, wait_seconds, should_stop)
-                                yield {
-                                    "type": "command_verdict", "approval_id": approval_id,
-                                    "command": command_text, "verdict": verdict,
-                                }
-                                if verdict == "approved":
-                                    context["approved_commands"].add(command_text)
-                                else:
-                                    note = {
-                                        "denied": "用户拒绝了这条命令",
-                                        "timeout": "等了 %d 秒没有确认，已放弃" % wait_seconds,
-                                        "cancelled": "用户停止了本次回答",
-                                    }.get(verdict, "未获批准")
+                                if context.get("approval_unavailable"):
+                                    # 本次运行已经有一条命令等确认超时——说明人不在电脑前。
+                                    # 再挂一条只会让后面每条命令都白等满 120 秒：实测「改完 →
+                                    # 验证」两次超时，整轮拖了 4 分半才收尾。直接回绝，
+                                    # 逼模型换不需要确认的路（compileall 就是 auto 的）。
                                     result = ToolResult(
                                         False, "",
-                                        error="%s，命令没有执行：%s。不要原样重试；"
-                                              "换一种不需要确认的做法，或直接说明需要用户自己运行它。"
-                                              % (note, command_text),
+                                        error="刚才已有一条命令等你确认超时，本次运行不再发起确认。"
+                                              "请改用不需要确认的命令（例如 python -m compileall <文件>），"
+                                              "或直接说明需要你在终端里自己运行：%s" % command_text,
                                     )
+                                else:
+                                    approval_id = uuid.uuid4().hex[:12]
+                                    wait_seconds = int(min(APPROVAL_TIMEOUT,
+                                                            max(5.0, deadline - time.monotonic())))
+                                    yield {
+                                        "type": "command_ask", "run_id": run_id,
+                                        "approval_id": approval_id, "tool": name,
+                                        "command": command_text,
+                                        "cwd": str(arguments.get("cwd") or "."),
+                                        "reason": why, "wait_seconds": wait_seconds,
+                                    }
+                                    verdict = _wait_approval(run_id, approval_id, wait_seconds, should_stop)
+                                    yield {
+                                        "type": "command_verdict", "approval_id": approval_id,
+                                        "command": command_text, "verdict": verdict,
+                                    }
+                                    if verdict == "approved":
+                                        context["approved_commands"].add(command_text)
+                                    else:
+                                        # 超时说明人不在，后面的确认也不必再问；
+                                        # 拒绝说明人在但不同意这一条，下次仍可以问。
+                                        if verdict == "timeout":
+                                            context["approval_unavailable"] = True
+                                        note = {
+                                            "denied": "用户拒绝了这条命令",
+                                            "timeout": "等了 %d 秒没有确认，已放弃" % wait_seconds,
+                                            "cancelled": "用户停止了本次回答",
+                                        }.get(verdict, "未获批准")
+                                        result = ToolResult(
+                                            False, "",
+                                            error="%s，命令没有执行：%s。不要原样重试；"
+                                                  "换一种不需要确认的做法，或直接说明需要用户自己运行它。"
+                                                  % (note, command_text),
+                                        )
                         if result is None:
                             result = tool.invoke(arguments, context)
                         result_content = result.as_tool_message()
                         result_data, ok = result.data, result.ok
                 elapsed_ms = int((time.monotonic() - call_started) * 1000)
                 result_content = result_content[:budget.tool_output_chars]
+                # 只有真的执行过的命令才有 exit_code；被审批拒绝、找不到可执行文件
+                # 时 data 是空的，那种不算「跑过」，不能记进自测状态。
+                if name in WORKSPACE_COMMAND_TOOLS and isinstance(result_data, dict) \
+                        and result_data.get("exit_code") is not None:
+                    check.note_command(
+                        str(result_data.get("command") or ""),
+                        int(result_data["exit_code"]),
+                        bool(result_data.get("timed_out")),
+                    )
                 steps.append({
                     "kind": "tool_call", "round_no": round_no, "tool": name,
                     "args": arguments, "ok": ok, "elapsed_ms": elapsed_ms,
@@ -755,6 +808,7 @@ def run_agent_stream(
                 # 用户不用展开工具结果也能看到「到底改了哪几行」。
                 # 放在 tool_end 之前，前端才能把 diff 挂到刚建好的那条工具记录上。
                 if ok and name in WORKSPACE_EDIT_TOOLS and isinstance(result_data, dict):
+                    check.note_edit(str(result_data.get("path") or ""))
                     diff = result_data.get("diff")
                     if diff:
                         yield {
@@ -838,6 +892,9 @@ def run_agent_stream(
         "rounds": rounds,
         "duration_ms": int((time.monotonic() - started) * 1000),
         "total_tokens": total_tokens,
+        # 自测回路结果：前端据此在回答下面挂一条「未验证」警示，
+        # 而不是让模型自己一句「应该没问题」蒙混过去。
+        "self_check": check.summary(),
         # 让运行记录能回答「这条回答是哪个服务商、哪个模型给的」
         "provider": (used_provider or {}).get("name"),
         "model": used_model or (used_provider or {}).get("model"),

@@ -99,6 +99,9 @@ auto_cases = [
     "git tag",
     "ls src",
     "pip list",
+    # 只编译不执行：自测回路要模型跑一条验证命令，这条必须不用等人点确认
+    "python -m compileall src",
+    "python -m py_compile src/a.py",
 ]
 for cmd in auto_cases:
     got = tier(cmd)
@@ -367,7 +370,6 @@ agent.chat_completion_stream = make_fake(turns, captured)
 old_timeout = agent.APPROVAL_TIMEOUT
 agent.APPROVAL_TIMEOUT = 1
 
-
 def deny_when_asked():
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -394,6 +396,33 @@ agent.chat_completion_stream = make_fake(turns, captured)
 events = list(agent.run_agent_stream("跑个命令", mode="chat", allow_command=True))
 verdicts = [e for e in events if e["type"] == "command_verdict"]
 check("没人点就超时放弃", verdicts and verdicts[0]["verdict"] == "timeout", verdicts[:1])
+
+# 超时之后又遇到 ask 级命令：不再挂第二条确认，直接回绝。
+# 人不在电脑前时，每条 ask 命令都白等满 APPROVAL_TIMEOUT 会把一次运行拖成几分钟。
+captured.clear()
+two_asks = [
+    {"content": "", "usage": 1, "cancelled": False, "tool_calls": [{
+        "id": "c1", "name": "run_command",
+        "arguments": json.dumps({"command": "python -c \"print(1)\""}),
+    }]},
+    {"content": "", "usage": 1, "cancelled": False, "tool_calls": [{
+        "id": "c2", "name": "run_command",
+        "arguments": json.dumps({"command": "python -c \"print(2)\""}),
+    }]},
+    {"content": "那我不跑了。", "usage": 1, "cancelled": False, "tool_calls": []},
+]
+agent.chat_completion_stream = make_fake(two_asks, captured)
+events = list(agent.run_agent_stream("跑两条", mode="chat", allow_command=True))
+asks = [e for e in events if e["type"] == "command_ask"]
+ends = [e for e in events if e["type"] == "tool_end"]
+check("超时后不再发起第二次确认", len(asks) == 1, [e.get("command") for e in asks])
+check("第二条直接被回绝", len(ends) == 2 and "不再发起确认" in (ends[1]["preview"] or ""),
+      ends[1]["preview"][:150] if len(ends) > 1 else "")
+check("第二条没有干等", len(ends) == 2 and (ends[1]["elapsed_ms"] or 0) < 500,
+      [e.get("elapsed_ms") for e in ends])
+check("回绝时给出可用的替代方案", len(ends) == 2 and "compileall" in (ends[1]["preview"] or ""),
+      ends[1]["preview"][:150] if len(ends) > 1 else "")
+
 agent.APPROVAL_TIMEOUT = old_timeout
 
 print("\n[14] 预算随命令模式放宽")

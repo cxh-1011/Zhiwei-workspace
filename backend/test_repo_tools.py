@@ -81,7 +81,10 @@ check("包含行数信息", re.search(r"\d+ 行", r.content) is not None)
 check("不乱入被拉黑的目录", ".venv" not in r.content and "__pycache__" not in r.content)
 check("返回结构完整", {"path", "files", "shown"} <= set(r.data), sorted(r.data))
 
-r_all = invoke("repo_map", {"path": ".", "max_chars": 4000})
+# 6000 而不是默认 4000：地图在字符预算紧张时会逐级折叠每个文件的符号
+# （12 → 8 → 6 → 4），4000 下 agent.py 只剩前 6 个符号，run_agent_stream 被折掉了。
+# 这里要验的是「符号提取对不对」，不该被整仓预算的降级策略干扰。
+r_all = invoke("repo_map", {"path": ".", "max_chars": 6000})
 check("整仓地图包含 agent.py", "agent.py" in r_all.content)
 check("整仓地图包含 run_agent_stream", "run_agent_stream" in r_all.content, r_all.content[:200])
 check("整仓地图列出前端目录", "frontend/" in r_all.content, r_all.content[-160:])
