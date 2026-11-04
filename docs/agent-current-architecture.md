@@ -196,6 +196,44 @@ classify_command(command, cwd)
 
 回归测试见 `backend/test_todo_tools.py`（68 项）。
 
+## 自测回路
+
+`backend/selfcheck.py` 里的 `SelfCheck` 是一个纯状态机，不注册工具、不碰文件，只被 `agent.py` 在三处喂事件：
+
+| 位置 | 调用 | 作用 |
+|---|---|---|
+| 编辑工具成功落盘后 | `note_edit(path)` | 记下改过的代码文件 |
+| `run_command` 返回后（`data.exit_code` 存在才记） | `note_command(cmd, code, timed_out)` | 判断这条命令算不算验证 |
+| 每轮拼系统提示前 | `should_interrupt(allow_command)` / `reminder()` | 决定催不催 |
+| 模型不再调工具、准备收尾时 | `should_interrupt()` / `interrupt_prompt()` | 决定拦不拦 |
+
+### 判定
+
+`is_verification(command, exit_code, timed_out)` 三个否定条件：超时、退出码非零、首 token 属于纯浏览命令（`ls`/`cat`/`git status` 这类）。其余一律算验证——跑脚本、测试、编译、lint 都算，宁可宽，因为漏判会让模型被无意义地打断。
+
+`needs_check = 有代码类改动 and 未验证`。代码类按后缀判，`.md/.html/.css` 不算：没有客观验证手段的改动，逼模型跑命令只会白烧一轮。
+
+「改动之后」用单调序号比，不用时间戳：先跑测试再改代码不算验证，同一毫秒内的顺序也得能分清。
+
+### 只拦一次
+
+`interrupted` 标记保证最多拦一次。用户拒绝审批、项目确实没测试时，模型再怎么努力也验证不了，拦第二次就是拿轮次和上下文换一个同样的回答。放行但把 `pending` 带进 `done.self_check`，前端据此挂黄色警示条。
+
+### 事件与渲染
+
+- `verify_required`：`{round, files}`。前端清空流式缓冲区（被拦那版是草稿，不该和最终回答拼在一起），过程面板留一行「改动还没验证，已要求先跑一条测试」。
+- `done.self_check`：`{edited, pending, verified, interrupted, proof}`。`pending` 为真时在回答下挂 `.verify-warn`；`proof` 只留最近三条验证类命令，做一句话说明。
+- 步骤里存一条 `kind: "verify_gate"`，刷新后回看历史仍能看到「这儿被退回过一次」。
+
+### 被实测改掉的两处命令分级
+
+真机无人值守跑同一句请求（新建一个函数），三次结果：264 秒未验证 → 139 秒已验证 → **15.4 秒已验证**。
+
+- `python -m compileall` / `py_compile` 从 ask 改为 auto。它们只编译不执行，是验证语法最便宜的手段；不让它们直通，自测回路在无人值守时等于不存在（模型会卡在审批上等满两轮 120 秒）。
+- `context["approval_unavailable"]`：任何一条 ask 命令超时后置真，本次运行后续 ask 命令直接回绝并提示「改用 compileall 或让用户自己跑」，不再各等满 `APPROVAL_TIMEOUT`。判据是「超时=人不在」，**拒绝不算**——拒绝说明人在，只是不同意这一条。
+
+回归测试见 `backend/test_selfcheck.py`（69 项）。
+
 ## 部署
 
 部署前先备份服务器上的代码、`.env`、`chats.db`、`uploads/` 和 `paper_index/`。新版本新增 `openai` Python 依赖，上传代码后需要在 Python 3.11 虚拟环境里执行：
