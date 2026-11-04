@@ -101,3 +101,19 @@
 .edit-undo:disabled{cursor:wait;opacity:.7}
 .edit-undo.done{border-color:#d9ecdf;background:#f4faf5;color:#4a8059;cursor:default}
 @media(max-width:600px){.diff-body{max-height:200px}}
+
+/* 命令执行：确认卡片 */
+.cmd-ask{margin-top:8px;padding:9px 10px;border:1px solid #f0dcc9;border-radius:8px;background:#fdfaf5}
+.cmd-ask-head{color:#9a6a3c;font-size:10px;font-weight:600}
+.cmd-ask-cmd{margin-top:5px;padding:6px 8px;border-radius:6px;background:#fff;color:#3f4550;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.cmd-ask-why{margin:5px 0 0;color:#8b8f99;font-size:10px;line-height:1.5}
+.cmd-ask-actions{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:8px}
+.cmd-allow,.cmd-deny{padding:5px 11px;border-radius:7px;font-size:10px;font-weight:600;cursor:pointer}
+.cmd-allow{border:1px solid #cfe3d5;background:#f4faf5;color:#41724f}
+.cmd-allow:hover{border-color:#b7d8c1;background:#eef8f0}
+.cmd-deny{border:1px solid #e6e8ee;background:#fff;color:#7c828d}
+.cmd-deny:hover{border-color:#d9dce4;background:#f8f9fb}
+.cmd-allow:disabled,.cmd-deny:disabled{cursor:default;opacity:.55}
+.cmd-ask-hint{color:#a3a8b3;font-size:9px}
+.cmd-ask.allowed{background:#f6fbf7;border-color:#d9ecdf}
+.cmd-ask.denied{background:#fafafa;border-color:#e8e9ee}

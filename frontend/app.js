@@ -16,6 +16,9 @@ let allowWorkspace = false;
 // 是否允许助手修改工作区代码（write_file / edit_file）。默认关闭。
 // 开启后后端会自动带上只读工具，每次写入都会先备份，改完可以一键撤销。
 let allowCodeEdit = false;
+// 是否允许助手在工作区内执行命令（run_command）。默认关闭。
+// 与「允许改代码」分开：跑命令更危险。需要确认的命令会弹卡片等你点。
+let allowCommand = false;
 // 是否向模型请求思考过程（仅部分模型支持）。开启后回答上方会多出「思考」段落。
 let showThinking = false;
 
@@ -859,7 +862,8 @@ const TOOL_LABELS = {
     git_diff: "查看代码差异",
     git_log: "查看提交历史",
     write_file: "写入文件",
-    edit_file: "修改文件"
+    edit_file: "修改文件",
+    run_command: "运行命令"
 };
 
 function toolLabel(name) {
@@ -893,7 +897,10 @@ const ARG_LABELS = {
     limit: "条数",
     old_string: "原文锚点",
     new_string: "替换为",
-    replace_all: "替换全部"
+    replace_all: "替换全部",
+    command: "命令",
+    cwd: "目录",
+    timeout: "超时"
 };
 
 function formatArgValue(value) {
@@ -1107,6 +1114,90 @@ function liveReasoning(trace, text) {
     trace.reasoningEl.textContent += text;
     trace.body.scrollTop = trace.body.scrollHeight;
     liveSetStatus(trace, "思考中…", true);
+}
+
+// 需要确认的命令：在过程面板里插一张卡片，等你点「允许」或「拒绝」。
+// 不点就等于拒绝：后端等到超时会自己放弃，不会替你按下回车。
+function liveCommandAsk(trace, event) {
+    if (!trace) return;
+    const card = document.createElement("div");
+    card.className = "cmd-ask";
+    card.dataset.approvalId = event.approval_id || "";
+
+    const head = document.createElement("div");
+    head.className = "cmd-ask-head";
+    head.textContent = "这条命令要先经你同意";
+
+    const code = document.createElement("div");
+    code.className = "cmd-ask-cmd";
+    code.textContent = "$ " + (event.command || "");
+
+    const why = document.createElement("p");
+    why.className = "cmd-ask-why";
+    why.textContent = (event.reason || "需要确认") + `（目录 ${event.cwd || "."}）`;
+
+    const bar = document.createElement("div");
+    bar.className = "cmd-ask-actions";
+
+    const allow = document.createElement("button");
+    allow.type = "button";
+    allow.className = "cmd-allow";
+    allow.textContent = "允许执行";
+    allow.onclick = () => answerCommand(event, true);
+
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "cmd-deny";
+    deny.textContent = "拒绝";
+    deny.onclick = () => answerCommand(event, false);
+
+    const hint = document.createElement("span");
+    hint.className = "cmd-ask-hint";
+    hint.textContent = event.wait_seconds ? `${event.wait_seconds} 秒内不选就算拒绝` : "";
+
+    bar.append(allow, deny, hint);
+    card.append(head, code, why, bar);
+    trace.body.appendChild(card);
+    trace.body.scrollTop = trace.body.scrollHeight;
+    liveSetStatus(trace, "等你确认一条命令", true);
+}
+
+async function answerCommand(event, allow) {
+    const card = document.querySelector(`.cmd-ask[data-approval-id="${event.approval_id}"]`);
+    if (!card || card.dataset.done === "1") return;
+    card.dataset.done = "1";
+    card.querySelectorAll("button").forEach(btn => { btn.disabled = true; });
+    const hint = card.querySelector(".cmd-ask-hint");
+    if (hint) hint.textContent = allow ? "已允许，正在执行…" : "已拒绝";
+    card.classList.add(allow ? "allowed" : "denied");
+    const runId = event.run_id || (activeStream && activeStream.runId) || "";
+    try {
+        await apiJson(`/chat/approve/${encodeURIComponent(runId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ approval_id: event.approval_id, allow: Boolean(allow) })
+        });
+    } catch (err) {
+        // 后端已经放弃这条审批（超时）时不要装作成功，把按钮放开让你看清状态
+        if (hint) hint.textContent = "确认没送到后端：" + (err.message || "请重试");
+        card.dataset.done = "0";
+        card.querySelectorAll("button").forEach(btn => { btn.disabled = false; });
+    }
+}
+
+function liveCommandVerdict(trace, event) {
+    const card = document.querySelector(`.cmd-ask[data-approval-id="${event.approval_id}"]`);
+    if (!card) return;
+    const labels = {
+        approved: "已允许", denied: "已拒绝",
+        timeout: "超时没有确认，已放弃", cancelled: "已取消"
+    };
+    if (event.verdict === "approved" || event.verdict === "denied") return;
+    card.dataset.done = "1";
+    card.querySelectorAll("button").forEach(btn => { btn.disabled = true; });
+    card.classList.add("denied");
+    const hint = card.querySelector(".cmd-ask-hint");
+    if (hint) hint.textContent = labels[event.verdict] || "未获批准";
 }
 
 function liveNote(trace, text, kind) {
@@ -1462,6 +1553,7 @@ async function sendMessage() {
                 allow_writes: allowWrites,
                 allow_workspace: allowWorkspace,
                 allow_code_edit: allowCodeEdit,
+                allow_command: allowCommand,
                 show_thinking: showThinking
             },
             event => {
@@ -1482,6 +1574,14 @@ async function sendMessage() {
 
                     case "tool_start":
                         liveToolStart(live, event.tool, event.args);
+                        break;
+
+                    case "command_ask":
+                        liveCommandAsk(live, event);
+                        break;
+
+                    case "command_verdict":
+                        liveCommandVerdict(live, event);
                         break;
 
                     case "file_edit":
@@ -2684,6 +2784,15 @@ function onAllowCodeEditChange() {
     }
 }
 
+// 命令执行开关：开启后后端才注册 run_command。
+// 需要确认的命令仍会弹卡片，勾选这个只代表「允许它申请执行」，不代表可以随便跑。
+function onAllowCommandChange() {
+    const box = $("allowCommand");
+    allowCommand = Boolean(box && box.checked);
+    box?.closest(".write-toggle")?.classList.toggle("on", allowCommand);
+    try { localStorage.setItem("allowCommand", allowCommand ? "1" : "0"); } catch (_) { /* 隐私模式忽略 */ }
+}
+
 // 思考过程开关：开启后请求模型返回 reasoning_content，显示在过程面板里
 function onShowThinkingChange() {
     const box = $("showThinking");
@@ -2717,6 +2826,12 @@ function restoreAllowWrites() {
     allowCodeEdit = Boolean(codeBox.checked);
     codeBox.closest(".write-toggle")?.classList.toggle("on", allowCodeEdit);
     // 恢复时不开「读代码」：只要用户自己勾过写，读由后端隐式带上，界面不改用户的勾选
+
+    const cmdBox = $("allowCommand");
+    if (!cmdBox) return;
+    try { cmdBox.checked = localStorage.getItem("allowCommand") === "1"; } catch (_) { cmdBox.checked = false; }
+    allowCommand = Boolean(cmdBox.checked);
+    cmdBox.closest(".write-toggle")?.classList.toggle("on", allowCommand);
 }
 
 async function openLearningHub() {
