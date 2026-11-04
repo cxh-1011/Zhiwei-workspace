@@ -12,12 +12,87 @@ from tools import all_schemas, get_tool
 import tools as registered_tools  # noqa: F401
 
 logger = logging.getLogger("ai_robot.agent")
-MAX_ROUNDS = max(1, min(int(os.getenv("AGENT_MAX_ROUNDS", "5")), 8))
-MAX_TOOL_CALLS_PER_ROUND = max(1, min(int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_ROUND", "3")), 5))
-TOTAL_TIMEOUT = max(15.0, min(float(os.getenv("AGENT_TOTAL_TIMEOUT", "60")), 180.0))
-MAX_CONTEXT_CHARS = max(8000, min(int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "24000")), 60000))
-MAX_TOOL_OUTPUT_CHARS = 6000
-MAX_TOKENS_PER_RUN = max(2000, min(int(os.getenv("AGENT_MAX_TOKENS_PER_RUN", "12000")), 40000))
+# ---------------------------------------------------------------- 预算
+# 两套预算。普通问答保持紧凑：够用就好，快；改代码模式要留出
+# 「读 → 改 → 看 diff → 返工」的完整回路，轮次、工具数、超时、上下文全部放宽一档。
+# 环境变量只能在这个区间内调整，代码里的上下界才是最后一道闸。
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    """读整数环境变量；非法值退回默认，结果夹在 [low, high]。"""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(value, high))
+
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(value, high))
+
+
+class Budget:
+    """一次运行的五项预算：轮次、单轮工具数、总耗时、单次模型超时、上下文与 token。"""
+
+    __slots__ = ("rounds", "tools_per_round", "seconds", "llm_seconds",
+                 "context_chars", "tokens", "tool_output_chars")
+
+    def __init__(self, rounds, tools_per_round, seconds, llm_seconds,
+                 context_chars, tokens, tool_output_chars=6000):
+        self.rounds = rounds
+        self.tools_per_round = tools_per_round
+        self.seconds = seconds
+        self.llm_seconds = llm_seconds
+        self.context_chars = context_chars
+        self.tokens = tokens
+        self.tool_output_chars = tool_output_chars
+
+    def as_dict(self) -> dict:
+        return {key: getattr(self, key) for key in self.__slots__}
+
+    def describe(self) -> str:
+        return ("最多 %d 轮、单轮 %d 个工具、总计 %d 秒、上下文 %d 字符、token %d"
+                % (self.rounds, self.tools_per_round, int(self.seconds),
+                   self.context_chars, self.tokens))
+
+
+CHAT_BUDGET = Budget(
+    rounds=_env_int("AGENT_MAX_ROUNDS", 5, 1, 8),
+    tools_per_round=_env_int("AGENT_MAX_TOOL_CALLS_PER_ROUND", 3, 1, 5),
+    seconds=_env_float("AGENT_TOTAL_TIMEOUT", 60, 15, 180),
+    llm_seconds=_env_float("AGENT_LLM_TIMEOUT", 30, 10, 60),
+    context_chars=_env_int("AGENT_MAX_CONTEXT_CHARS", 24000, 8000, 60000),
+    tokens=_env_int("AGENT_MAX_TOKENS_PER_RUN", 12000, 2000, 40000),
+)
+
+# 5 轮 / 3 工具在改代码时根本不够：读一个文件（1 轮）、改一处（1 轮）、
+# 再核对另一处（1 轮）就用完了，连返工的机会都没有。
+CODE_BUDGET = Budget(
+    rounds=_env_int("AGENT_CODE_MAX_ROUNDS", 20, 5, 30),
+    tools_per_round=_env_int("AGENT_CODE_MAX_TOOL_CALLS_PER_ROUND", 6, 2, 10),
+    seconds=_env_float("AGENT_CODE_TOTAL_TIMEOUT", 300, 60, 600),
+    llm_seconds=_env_float("AGENT_CODE_LLM_TIMEOUT", 60, 20, 120),
+    context_chars=_env_int("AGENT_CODE_MAX_CONTEXT_CHARS", 60000, 24000, 120000),
+    tokens=_env_int("AGENT_CODE_MAX_TOKENS_PER_RUN", 60000, 12000, 120000),
+)
+
+
+def budget_for(allow_code_edit: bool = False) -> Budget:
+    """开启改代码就走宽预算，其余模式保持紧凑。"""
+    return CODE_BUDGET if allow_code_edit else CHAT_BUDGET
+
+
+# 兼容旧引用：早期代码与测试直接读这些模块级名字，指向紧凑档。
+MAX_ROUNDS = CHAT_BUDGET.rounds
+MAX_TOOL_CALLS_PER_ROUND = CHAT_BUDGET.tools_per_round
+TOTAL_TIMEOUT = CHAT_BUDGET.seconds
+MAX_CONTEXT_CHARS = CHAT_BUDGET.context_chars
+MAX_TOOL_OUTPUT_CHARS = CHAT_BUDGET.tool_output_chars
+MAX_TOKENS_PER_RUN = CHAT_BUDGET.tokens
 
 # 工作区工具分两组：读的一组，写的一组。写工具必须显式开启「允许改代码」才注册。
 WORKSPACE_READ_TOOLS = ("repo_map", "list_dir", "read_file", "grep_code", "git_status", "git_diff", "git_log")
@@ -90,8 +165,15 @@ def _estimate_chars(messages: list[dict]) -> int:
     return total
 
 
-def _fit_context(messages: list[dict]) -> list[dict]:
-    if _estimate_chars(messages) <= MAX_CONTEXT_CHARS:
+def _fit_context(messages: list[dict], limit: int | None = None) -> list[dict]:
+    """裁剪历史，但永远保留用户的当前问题。
+
+    早期版本只从后往前装，一旦最近几轮的工具体积就超过上限，kept_groups 会是空的，
+    于是整段对话只剩 system —— 模型拿不到问题，只能胡乱作答。改代码模式下
+    单轮工具结果 6000 字符、最多 6 个，很容易踩到，所以这里把第一条 user 消息钉住。
+    """
+    limit = limit or MAX_CONTEXT_CHARS
+    if _estimate_chars(messages) <= limit:
         return messages
     system = messages[:1]
     rest = messages[1:]
@@ -108,16 +190,24 @@ def _fit_context(messages: list[dict]) -> list[dict]:
             index += 1
         groups.append(group)
 
-    kept_groups = []
+    # 当前问题（第一条 user 消息）单独钉住：无论后面多挤都不能丢
+    anchor = [groups[0]] if groups and groups[0][0].get("role") == "user" else []
+    tail = groups[1:] if anchor else groups
+
     used = len(str(system[0].get("content", ""))) if system else 0
-    for group in reversed(groups):
+    used += _estimate_chars([item for group in anchor for item in group]) if anchor else 0
+
+    kept_groups = []
+    for group in reversed(tail):
         cost = _estimate_chars(group)
-        if used + cost > MAX_CONTEXT_CHARS:
+        if used + cost > limit:
             break
         kept_groups.append(group)
         used += cost
     kept_groups.reverse()
-    return system + [item for group in kept_groups for item in group]
+
+    kept = anchor + kept_groups
+    return system + [item for group in kept for item in group]
 
 
 def _assistant_message(content: str, calls: list[dict]) -> dict:
@@ -197,7 +287,9 @@ def run_agent_stream(
     """
     run_id = uuid.uuid4().hex
     started = time.monotonic()
-    deadline = started + TOTAL_TIMEOUT
+    # 预算按模式取：改代码要宽得多，否则读改两轮就到顶
+    budget = budget_for(allow_code_edit)
+    deadline = started + budget.seconds
     steps: list[dict] = []
     tool_names = allowed_tools if allowed_tools is not None else {
         "chat": ["web_search", "scholarly_search", "paper_search", "search_uploaded_files", "list_uploaded_files"],
@@ -311,7 +403,8 @@ def run_agent_stream(
     seen_calls: set[str] = set()
     should_stop = lambda: is_cancelled(run_id)  # noqa: E731
 
-    yield {"type": "start", "run_id": run_id, "mode": mode, "rounds_limit": MAX_ROUNDS}
+    yield {"type": "start", "run_id": run_id, "mode": mode,
+           "rounds_limit": budget.rounds, "budget": budget.as_dict()}
 
     try:
         # Paper mode is specifically for discussing the locally parsed PDF. Do not
@@ -328,7 +421,7 @@ def run_agent_stream(
                 call_started = time.monotonic()
                 yield {"type": "tool_start", "tool": "paper_search", "args": arguments}
                 result = paper_tool.invoke(arguments, context)
-                result_content = result.as_tool_message()[:MAX_TOOL_OUTPUT_CHARS]
+                result_content = result.as_tool_message()[:budget.tool_output_chars]
                 signature = "paper_search:" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
                 seen_calls.add(signature)
                 messages.append({
@@ -356,17 +449,17 @@ def run_agent_stream(
                     "elapsed_ms": elapsed_ms, "preview": result_content[:700],
                 }
 
-        for round_no in range(1, MAX_ROUNDS + 1):
+        for round_no in range(1, budget.rounds + 1):
             rounds = round_no
             if should_stop():
                 status = "cancelled"
                 steps.append({"kind": "limit", "round_no": round_no, "reason": "用户停止了本次回答"})
                 yield {"type": "limit", "reason": "已按你的要求停止"}
                 break
-            if total_tokens >= MAX_TOKENS_PER_RUN:
+            if total_tokens >= budget.tokens:
                 status = "token_limit"
-                steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {MAX_TOKENS_PER_RUN}"})
-                yield {"type": "limit", "reason": f"已达本次 token 预算上限（{MAX_TOKENS_PER_RUN}）"}
+                steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {budget.tokens}"})
+                yield {"type": "limit", "reason": f"已达本次 token 预算上限（{budget.tokens}）"}
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 1:
@@ -374,17 +467,17 @@ def run_agent_stream(
                 steps.append({"kind": "limit", "round_no": round_no, "reason": "总耗时达到上限"})
                 yield {"type": "limit", "reason": "已达本次回答的时间上限"}
                 break
-            messages = _fit_context(messages)
+            messages = _fit_context(messages, budget.context_chars)
 
             # 前端用它标出「第 N 轮」，让用户看到模型是在反复查证还是准备收尾
-            yield {"type": "round", "round": round_no, "max_rounds": MAX_ROUNDS}
+            yield {"type": "round", "round": round_no, "max_rounds": budget.rounds}
 
             turn = None
             reasoning_parts: list[str] = []
             llm_started = time.monotonic()
             try:
                 for kind, payload in chat_completion_stream(
-                    messages, tools=schemas, timeout=min(30, remaining),
+                    messages, tools=schemas, timeout=min(budget.llm_seconds, remaining),
                     should_stop=should_stop, require_vision=require_vision,
                     enable_thinking=show_thinking,
                 ):
@@ -444,11 +537,11 @@ def run_agent_stream(
                 steps.append({"kind": "final", "round_no": round_no})
                 break
 
-            accepted = calls[:MAX_TOOL_CALLS_PER_ROUND]
+            accepted = calls[:budget.tools_per_round]
             messages.append(_assistant_message(turn.get("content") or "", calls))
             if len(calls) > len(accepted):
-                steps.append({"kind": "limit", "round_no": round_no, "reason": f"单轮工具数上限为 {MAX_TOOL_CALLS_PER_ROUND}"})
-                yield {"type": "limit", "reason": f"单轮工具数超过上限（{MAX_TOOL_CALLS_PER_ROUND}），已忽略多余调用"}
+                steps.append({"kind": "limit", "round_no": round_no, "reason": f"单轮工具数上限为 {budget.tools_per_round}"})
+                yield {"type": "limit", "reason": f"单轮工具数超过上限（{budget.tools_per_round}），已忽略多余调用"}
 
             for call in accepted:
                 if should_stop():
@@ -489,7 +582,7 @@ def run_agent_stream(
                         result_content = result.as_tool_message()
                         result_data, ok = result.data, result.ok
                 elapsed_ms = int((time.monotonic() - call_started) * 1000)
-                result_content = result_content[:MAX_TOOL_OUTPUT_CHARS]
+                result_content = result_content[:budget.tool_output_chars]
                 steps.append({
                     "kind": "tool_call", "round_no": round_no, "tool": name,
                     "args": arguments, "ok": ok, "elapsed_ms": elapsed_ms,
@@ -528,8 +621,8 @@ def run_agent_stream(
                 break
         else:
             status = "max_rounds"
-            steps.append({"kind": "limit", "round_no": MAX_ROUNDS, "reason": f"最多执行 {MAX_ROUNDS} 轮"})
-            yield {"type": "limit", "reason": f"已达到最多 {MAX_ROUNDS} 轮工具调用"}
+            steps.append({"kind": "limit", "round_no": budget.rounds, "reason": f"最多执行 {budget.rounds} 轮"})
+            yield {"type": "limit", "reason": f"已达到最多 {budget.rounds} 轮工具调用"}
 
         if not reply and status in {"timeout", "max_rounds", "token_limit"}:
             closing = yield from _final_stream(

@@ -948,12 +948,15 @@ function liveSetStatus(trace, text, spinning) {
 
 function liveAddRound(trace, round, max) {
     if (!trace) return;
+    // 改代码模式有 20 轮，标出「3/20」用户才知道还剩多少、要不要收尾
+    const total = Number(max) > 0 ? `/${max}` : "";
+    const label = round === 1 ? `第 1${total} 轮 · 理解问题` : `第 ${round}${total} 轮 · 继续分析`;
     const row = document.createElement("div");
     row.className = "trace-live-round";
-    row.textContent = round === 1 ? "第 1 轮 · 理解问题" : `第 ${round} 轮 · 继续分析`;
+    row.textContent = label;
     trace.body.appendChild(row);
     trace.body.scrollTop = trace.body.scrollHeight;
-    liveSetStatus(trace, round === 1 ? "第 1 轮 · 分析问题" : `第 ${round} 轮 · 继续分析`, true);
+    liveSetStatus(trace, label, true);
 }
 
 function liveToolStart(trace, name, args) {
