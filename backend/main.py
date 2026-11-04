@@ -30,7 +30,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # AI助手角色设定
 # ======================
 
-from agent import run_agent, run_agent_stream, request_cancel
+from agent import run_agent, run_agent_stream, request_cancel, resolve_approval
 from llm import ModelConfigError, chat_completion, test_connection
 import model_store
 from tools.edits import restore_edits
@@ -202,6 +202,9 @@ class Message(BaseModel):
     # 是否允许助手修改工作区代码（write_file / edit_file）。默认关闭。
     # 开启后自动带上只读工具：改代码前必须先能读代码。每次写入都会先备份。
     allow_code_edit: StrictBool = False
+    # 是否允许助手在工作区内执行命令（run_command）。默认关闭，且与「允许改代码」
+    # 分开：跑命令比改文件更危险。需要确认的命令会走 /chat/approve 等用户点击。
+    allow_command: StrictBool = False
     # 是否请求模型的思考过程（仅部分服务商支持，例如 Qwen3 系列）。默认关闭。
     show_thinking: StrictBool = False
 
@@ -325,6 +328,7 @@ def chat(message: Message):
             allow_writes=message.allow_writes,
             allow_workspace=message.allow_workspace,
             allow_code_edit=message.allow_code_edit,
+            allow_command=message.allow_command,
             show_thinking=message.show_thinking,
         )
         _persist_chat(message.chat_id, message.text, result)
@@ -360,6 +364,7 @@ def chat_stream(message: Message):
                 allow_writes=message.allow_writes,
                 allow_workspace=message.allow_workspace,
                 allow_code_edit=message.allow_code_edit,
+                allow_command=message.allow_command,
                 show_thinking=message.show_thinking,
             ):
                 if event.get("type") == "done":
@@ -387,6 +392,23 @@ def chat_stream(message: Message):
 def cancel_chat(run_id: str):
     request_cancel(run_id)
     return {"cancelled": True, "run_id": run_id}
+
+
+class ApprovalPayload(BaseModel):
+    approval_id: str = Field(..., min_length=4, max_length=64)
+    allow: StrictBool = False
+
+
+@app.post("/chat/approve/{run_id}")
+def approve_command(run_id: str, payload: ApprovalPayload):
+    """批准或拒绝一条等待确认的命令。
+
+    审批按「运行号 + 审批号」双键匹配：拿别的运行的审批号点不动；超时后条目
+    已从注册表移除，这里如实返回 404，而不是悄悄放行。
+    """
+    if not resolve_approval(run_id, payload.approval_id, bool(payload.allow)):
+        raise HTTPException(status_code=404, detail="这条确认已失效（可能已超时或已被处理）")
+    return {"ok": True, "allow": bool(payload.allow), "approval_id": payload.approval_id}
 
 
 # ======================

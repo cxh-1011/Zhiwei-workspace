@@ -3,12 +3,15 @@ import logging
 import mimetypes
 import os
 import re
+import threading
 import time
 import uuid
 import base64
 
 from llm import ModelConfigError, chat_completion_stream
 from tools import all_schemas, get_tool
+from tools.base import ToolResult
+from tools.command import classify_command
 import tools as registered_tools  # noqa: F401
 
 logger = logging.getLogger("ai_robot.agent")
@@ -97,6 +100,8 @@ MAX_TOKENS_PER_RUN = CHAT_BUDGET.tokens
 # 工作区工具分两组：读的一组，写的一组。写工具必须显式开启「允许改代码」才注册。
 WORKSPACE_READ_TOOLS = ("repo_map", "list_dir", "read_file", "grep_code", "git_status", "git_diff", "git_log")
 WORKSPACE_EDIT_TOOLS = ("write_file", "edit_file")
+# 命令执行单独一组：比写文件更危险，必须用户再勾一次「允许跑命令」
+WORKSPACE_COMMAND_TOOLS = ("run_command",)
 
 # 工具参数长度上限：检索类工具 4k 字就够，写入类要把整个文件内容塞进参数里，
 # 用同一个上限会把正常改动拦成「参数过长」。
@@ -146,6 +151,42 @@ def is_cancelled(run_id: str) -> bool:
 
 def clear_cancel(run_id: str) -> None:
     _CANCEL.pop(run_id, None)
+
+
+# 命令审批：需要确认的命令在这里挂起，等 /chat/approve/{run_id} 决定。
+# 用内存字典 + threading.Event，因为生命周期只有一次请求。等待期间按 0.25 秒
+# 轮询而不是一直阻塞：这样点「停止」能立刻退出，不会白等满 120 秒。
+_APPROVALS: dict[str, dict] = {}
+
+APPROVAL_TIMEOUT = max(20, min(int(os.getenv("AGENT_APPROVAL_TIMEOUT", "120")), 300))
+
+
+def resolve_approval(run_id: str, approval_id: str, allow: bool) -> bool:
+    """前端点了「允许」或「拒绝」。返回 False 表示这条审批已失效或不属于本次运行。"""
+    entry = _APPROVALS.get(approval_id)
+    if entry is None or entry.get("run_id") != run_id:
+        return False
+    entry["allow"] = bool(allow)
+    entry["event"].set()
+    return True
+
+
+def _wait_approval(run_id: str, approval_id: str, timeout: float, should_stop) -> str:
+    """等用户决定，返回 approved / denied / timeout / cancelled。"""
+    entry = {"run_id": run_id, "event": threading.Event(), "allow": None}
+    _APPROVALS[approval_id] = entry
+    try:
+        deadline = time.monotonic() + max(1.0, timeout)
+        while True:
+            if entry["event"].wait(0.25):
+                break
+            if should_stop():
+                return "cancelled"
+            if time.monotonic() > deadline:
+                return "timeout"
+        return "approved" if entry["allow"] else "denied"
+    finally:
+        _APPROVALS.pop(approval_id, None)
 
 
 def _estimate_chars(messages: list[dict]) -> int:
@@ -275,6 +316,7 @@ def run_agent_stream(
     allow_writes: bool = False,
     allow_workspace: bool = False,
     allow_code_edit: bool = False,
+    allow_command: bool = False,
     show_thinking: bool = False,
 ):
     """执行一次 Agent，边跑边产出事件。
@@ -287,8 +329,8 @@ def run_agent_stream(
     """
     run_id = uuid.uuid4().hex
     started = time.monotonic()
-    # 预算按模式取：改代码要宽得多，否则读改两轮就到顶
-    budget = budget_for(allow_code_edit)
+    # 预算按模式取：改代码与跑命令都要宽得多，否则读改两轮就到顶
+    budget = budget_for(allow_code_edit or allow_command)
     deadline = started + budget.seconds
     steps: list[dict] = []
     tool_names = allowed_tools if allowed_tools is not None else {
@@ -311,7 +353,7 @@ def run_agent_stream(
     # 这一组全是只读的：看结构、读文件、搜代码、看 git 状态与历史。
     # 不能改文件，也不能执行命令。
     # 开启「允许改代码」时自动带上读工具——改代码前必须能先读代码。
-    if allow_workspace or allow_code_edit:
+    if allow_workspace or allow_code_edit or allow_command:
         tool_names = list(tool_names) + [
             name for name in WORKSPACE_READ_TOOLS if name not in tool_names
         ]
@@ -322,8 +364,19 @@ def run_agent_stream(
             name for name in WORKSPACE_EDIT_TOOLS if name not in tool_names
         ]
 
+    # 命令执行再单独一道门：跑命令比改文件更危险，所以不复用「允许改代码」的开关。
+    if allow_command:
+        tool_names = list(tool_names) + [
+            name for name in WORKSPACE_COMMAND_TOOLS if name not in tool_names
+        ]
+
     # run_id 传给工具，写入工具据此把备份落到 backups/agent-edits/<run_id>/
-    context = {"mode": mode, "filename": filename, "run_id": run_id, "allow_code_edit": allow_code_edit}
+    context = {
+        "mode": mode, "filename": filename, "run_id": run_id,
+        "allow_code_edit": allow_code_edit, "allow_command": allow_command,
+        # 用户批准过的命令原文：run_command 内部会再核对一次，防绕过
+        "approved_commands": set(),
+    }
     prompt = SYSTEM_PROMPT
     if mode == "file":
         if image_path:
@@ -371,9 +424,24 @@ def run_agent_stream(
             "不要靠换路径写法、改大小写、复制一份再改、把内容写进另一个文件名来绕过；"
             "⑧ 只能处理文本：二进制文件既不能读也不能改，write_file 也不生成图片、压缩包或可执行文件；"
             "⑨ 体积：单文件读取 2 MB、写入 200 KB、单次运行最多 20 个文件；超大文件用 "
-            "read_file(start_line=, max_lines=) 分片读，不要一次读完；"
-            "⑩ 你还没有执行命令和跑测试的能力，所以改完只能说明「已改但未验证」，"
-            "不要声称测试通过或运行成功。"
+            "read_file(start_line=, max_lines=) 分片读，不要一次读完。"
+        )
+        if not allow_command:
+            prompt += ("⑩ 你还没有执行命令和跑测试的能力，所以改完只能说明「已改但未验证」，"
+                       "不要声称测试通过或运行成功。")
+
+    if allow_command:
+        prompt += (
+            "\n\n用户已开启「允许跑命令」。你有 run_command，可以在项目内执行命令，"
+            "用来跑测试、跑脚本、看 git 状态。规则："
+            "① 不经过 shell：不能用管道、重定向（> >>）、&& 串联、反引号；一次只跑一条命令，"
+            "需要多步就分多次调用，不要试图用外层解释器包装（例如 bash -c）来绕过；"
+            "② 删除、移动、下载、改权限、改系统设置一律被拒绝，不要尝试；"
+            "③ 安装依赖、构建、python -c 这类命令会让用户点「允许」，被拒绝就换方案，不要反复重试；"
+            "④ 跑测试优先用 `python -m pytest <指定文件> -q`，先跑小范围再跑全量，不要一上来全仓跑；"
+            "⑤ 命令超时或退出码非零时，读输出定位问题；改完再跑一次验证，而不是改完就宣布成功；"
+            "⑥ 只能声称「命令退出码 0、测试通过」当你真的看到这个结果；没跑过就说没跑过；"
+            "⑦ 长驻服务（dev server、watch）不要用 run_command 启动，它会一直占着直到超时。"
         )
 
     messages = [{"role": "system", "content": prompt}]
@@ -402,6 +470,9 @@ def run_agent_stream(
     visible_parts: list[str] = []
     seen_calls: set[str] = set()
     should_stop = lambda: is_cancelled(run_id)  # noqa: E731
+    # 让 run_command 在命令执行期间也能感知「停止」：否则一条 60 秒的命令
+    # 会把「停止」按钮晾在那儿直到超时。
+    context["should_stop"] = should_stop
 
     yield {"type": "start", "run_id": run_id, "mode": mode,
            "rounds_limit": budget.rounds, "budget": budget.as_dict()}
@@ -570,7 +641,10 @@ def run_agent_stream(
                 else:
                     signature = name + ":" + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
                     tool = get_tool(name)
-                    if signature in seen_calls:
+                    # 「不要重复调用」只适用于检索类工具：重复搜同一个词没有新信息。
+                    # 命令不是这样——改完代码重跑同一条测试是最正确的动作，
+                    # 拦掉它等于逼模型改参数绕过去（实测它就去掉了 -v 再跑一次）。
+                    if signature in seen_calls and name not in WORKSPACE_COMMAND_TOOLS:
                         result_content = "工具执行失败：检测到完全重复的调用，请换一种检索条件或直接作答。"
                         result_data, ok = {}, False
                     elif tool is None or name not in tool_names:
@@ -578,7 +652,46 @@ def run_agent_stream(
                         result_data, ok = {}, False
                     else:
                         seen_calls.add(signature)
-                        result = tool.invoke(arguments, context)
+                        result = None
+                        if name in WORKSPACE_COMMAND_TOOLS:
+                            # 需要确认的命令在这里挂起：发 command_ask 事件，等前端
+                            # 点「允许/拒绝」。被拒或超时就不执行，把「没执行」
+                            # 作为工具结果回给模型，让它换方案而不是原样重试。
+                            command_text = str(arguments.get("command") or "")
+                            tier, why = classify_command(
+                                command_text, str(arguments.get("cwd") or "."))
+                            if tier == "ask":
+                                approval_id = uuid.uuid4().hex[:12]
+                                wait_seconds = int(min(APPROVAL_TIMEOUT,
+                                                        max(5.0, deadline - time.monotonic())))
+                                yield {
+                                    "type": "command_ask", "run_id": run_id,
+                                    "approval_id": approval_id, "tool": name,
+                                    "command": command_text,
+                                    "cwd": str(arguments.get("cwd") or "."),
+                                    "reason": why, "wait_seconds": wait_seconds,
+                                }
+                                verdict = _wait_approval(run_id, approval_id, wait_seconds, should_stop)
+                                yield {
+                                    "type": "command_verdict", "approval_id": approval_id,
+                                    "command": command_text, "verdict": verdict,
+                                }
+                                if verdict == "approved":
+                                    context["approved_commands"].add(command_text)
+                                else:
+                                    note = {
+                                        "denied": "用户拒绝了这条命令",
+                                        "timeout": "等了 %d 秒没有确认，已放弃" % wait_seconds,
+                                        "cancelled": "用户停止了本次回答",
+                                    }.get(verdict, "未获批准")
+                                    result = ToolResult(
+                                        False, "",
+                                        error="%s，命令没有执行：%s。不要原样重试；"
+                                              "换一种不需要确认的做法，或直接说明需要用户自己运行它。"
+                                              % (note, command_text),
+                                    )
+                        if result is None:
+                            result = tool.invoke(arguments, context)
                         result_content = result.as_tool_message()
                         result_data, ok = result.data, result.ok
                 elapsed_ms = int((time.monotonic() - call_started) * 1000)
@@ -672,6 +785,7 @@ def run_agent(
     allow_writes: bool = False,
     allow_workspace: bool = False,
     allow_code_edit: bool = False,
+    allow_command: bool = False,
     show_thinking: bool = False,
 ) -> dict:
     """非流式包装：把事件流跑完，返回旧格式结果，旧接口与测试继续可用。"""
@@ -687,6 +801,7 @@ def run_agent(
         allow_writes=allow_writes,
         allow_workspace=allow_workspace,
         allow_code_edit=allow_code_edit,
+        allow_command=allow_command,
         show_thinking=show_thinking,
     ):
         if event.get("type") == "done":
