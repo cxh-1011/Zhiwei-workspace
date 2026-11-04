@@ -117,3 +117,23 @@
 .cmd-ask-hint{color:#a3a8b3;font-size:9px}
 .cmd-ask.allowed{background:#f6fbf7;border-color:#d9ecdf}
 .cmd-ask.denied{background:#fafafa;border-color:#e8e9ee}
+
+/* 任务清单：置顶进度卡 */
+.todo-card{margin:0 0 9px;padding:8px 10px;border:1px solid #e7eaf2;border-radius:9px;background:#fbfcfe}
+/* 实时面板里吸在顶部：工具一条条往下刷时，进度表不能跟着滚走 */
+.todo-card.compact{position:sticky;top:0;z-index:2;margin-bottom:8px;box-shadow:0 6px 12px -10px #1b2333}
+.todo-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.todo-title{color:#4c5462;font-size:10px;font-weight:700;letter-spacing:.02em}
+.todo-count{flex:0 0 auto;color:#6f7ac4;font-size:10px;font-weight:600}
+.todo-bar{height:3px;margin:6px 0 7px;overflow:hidden;border-radius:99px;background:#eceff6}
+.todo-bar span{display:block;height:100%;border-radius:inherit;background:#7c86c9;transition:width .25s}
+.todo-list{display:grid;gap:3px;margin:0;padding:0;list-style:none}
+.todo-card.compact .todo-list{max-height:104px;overflow:auto}
+.todo-item{display:flex;gap:6px;align-items:flex-start;color:#5a6270;font-size:10.5px;line-height:1.55}
+.todo-icon{flex:0 0 11px;color:#b3b9c6;font-size:9px;line-height:16px;text-align:center}
+.todo-text{min-width:0;overflow-wrap:anywhere}
+.todo-item.active{color:#3f4761;font-weight:600}
+.todo-item.active .todo-icon{color:#6f7ac4}
+.todo-item.done{color:#9aa1ae}
+.todo-item.done .todo-text{text-decoration:line-through}
+.todo-item.done .todo-icon{color:#4f9468}

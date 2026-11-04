@@ -863,7 +863,8 @@ const TOOL_LABELS = {
     git_log: "查看提交历史",
     write_file: "写入文件",
     edit_file: "修改文件",
-    run_command: "运行命令"
+    run_command: "运行命令",
+    update_todos: "更新任务清单"
 };
 
 function toolLabel(name) {
@@ -900,11 +901,18 @@ const ARG_LABELS = {
     replace_all: "替换全部",
     command: "命令",
     cwd: "目录",
-    timeout: "超时"
+    timeout: "超时",
+    items: "清单"
 };
 
 function formatArgValue(value) {
     if (value === null || value === undefined) return "";
+    // 清单这类对象数组如实序列化会把一行撑满，只报条数
+    if (Array.isArray(value)) {
+        if (!value.length) return "";
+        if (value.every(item => item && typeof item === "object")) return value.length + " 条";
+        return value.slice(0, 5).join("、");
+    }
     let text = typeof value === "object" ? JSON.stringify(value) : String(value);
     text = text.replace(/\s+/g, " ").trim();
     return text.length > 90 ? text.slice(0, 90) + "…" : text;
@@ -1033,6 +1041,61 @@ function liveToolEnd(trace, name, ok, elapsedMs, preview) {
 
 // 一段 unified diff → 红绿行。折叠标题就是「改了哪个文件、增删几行」。
 // 传入的 edit 结构：{ path, added, removed, created, diff }
+// 任务清单卡片：实时过程面板与历史过程面板共用。
+// 只认三种状态，图标比文字更快认出来：✓ 完成 / ▸ 进行中 / ○ 待办。
+function renderTodoCard(items, doneCount, totalCount, compact) {
+    const list = Array.isArray(items) ? items : [];
+    const total = Number(totalCount) > 0 ? Number(totalCount) : list.length;
+    const done = Number.isFinite(Number(doneCount))
+        ? Number(doneCount)
+        : list.filter(item => item && item.status === "done").length;
+
+    const card = document.createElement("div");
+    card.className = "todo-card" + (compact ? " compact" : "");
+
+    const head = document.createElement("div");
+    head.className = "todo-head";
+
+    const title = document.createElement("span");
+    title.className = "todo-title";
+    title.textContent = "任务清单";
+
+    const count = document.createElement("span");
+    count.className = "todo-count";
+    count.textContent = done + "/" + total + (done >= total && total ? " 完成" : "");
+
+    head.append(title, count);
+
+    const bar = document.createElement("div");
+    bar.className = "todo-bar";
+    const fill = document.createElement("span");
+    fill.style.width = (total ? Math.round(done / total * 100) : 0) + "%";
+    bar.appendChild(fill);
+
+    const ul = document.createElement("ul");
+    ul.className = "todo-list";
+    list.forEach(item => {
+        const status = item && item.status === "done" ? "done"
+            : item && item.status === "active" ? "active" : "pending";
+        const li = document.createElement("li");
+        li.className = "todo-item " + status;
+
+        const icon = document.createElement("span");
+        icon.className = "todo-icon";
+        icon.textContent = status === "done" ? "✓" : status === "active" ? "▸" : "○";
+
+        const text = document.createElement("span");
+        text.className = "todo-text";
+        text.textContent = (item && item.text) || "";
+
+        li.append(icon, text);
+        ul.appendChild(li);
+    });
+
+    card.append(head, bar, ul);
+    return card;
+}
+
 function renderDiffBlock(edit, open) {
     const details = document.createElement("details");
     details.className = "edit-diff";
@@ -1075,6 +1138,19 @@ function renderDiffBlock(edit, open) {
 
 // 流式过程中收到 file_edit：把 diff 挂到刚建的那条工具记录里，
 // 用户不用等回答结束就能看到改了哪几行。
+function liveTodos(trace, event) {
+    if (!trace || !Array.isArray(event.items)) return;
+    const card = renderTodoCard(event.items, event.done, event.total, true);
+    if (trace.todoEl && trace.todoEl.parentNode) {
+        // 就地替换：卡片一直待在面板顶部，不因刷新而跳动
+        trace.todoEl.replaceWith(card);
+    } else {
+        trace.body.insertBefore(card, trace.body.firstChild);
+    }
+    trace.todoEl = card;
+    trace.body.scrollTop = trace.body.scrollHeight;
+}
+
 function liveFileEdit(trace, event) {
     if (!trace) return;
     const pending = (trace.pending || []).find(item => item.name === event.tool);
@@ -1588,6 +1664,10 @@ async function sendMessage() {
                         liveFileEdit(live, event);
                         break;
 
+                    case "todos":
+                        liveTodos(live, event);
+                        break;
+
                     case "tool_end":
                         liveToolEnd(live, event.tool, event.ok, event.elapsed_ms, event.preview);                        // 多轮之间留一个空行，免得「我查一下…」和正式回答黏在一起
                         if (buffer.trim() && !buffer.endsWith("\n\n")) {
@@ -1772,10 +1852,19 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen, runId) {
 
     const summary = document.createElement("summary");
     const tools = steps.filter(step => step.kind === "tool_call");
+    // 清单可能被更新过多次，历史里只呈现最后一次的完整快照
+    const todoStep = steps.reduce((last, step) => (
+        step.kind === "tool_call" && step.ok
+            && step.result_data && Array.isArray(step.result_data.items)
+            && step.result_data.items.length ? step : last), null);
     const thoughts = steps.filter(step => step.kind === "llm_call" && step.reasoning);
     const seconds = ((durationMs || 0) / 1000).toFixed(1);
     const pieces = [];
     if (tools.length) pieces.push(`调用了 ${tools.length} 个工具`);
+    if (todoStep) {
+        const todo = todoStep.result_data;
+        pieces.push(`任务 ${todo.done || 0}/${todo.total || todo.items.length}`);
+    }
     pieces.push(`${rounds || 1} 轮`);
     if (thoughts.length) pieces.push("含思考过程");
     pieces.push(`${seconds} 秒`);
@@ -1871,6 +1960,15 @@ function renderAgentTrace(steps, status, rounds, durationMs, forceOpen, runId) {
 
         list.appendChild(item);
     });
+
+    if (todoStep) {
+        details.appendChild(renderTodoCard(
+            todoStep.result_data.items,
+            todoStep.result_data.done,
+            todoStep.result_data.total,
+            false
+        ));
+    }
 
     details.appendChild(list);
 
