@@ -80,7 +80,10 @@ CODE_BUDGET = Budget(
     seconds=_env_float("AGENT_CODE_TOTAL_TIMEOUT", 300, 60, 600),
     llm_seconds=_env_float("AGENT_CODE_LLM_TIMEOUT", 60, 20, 120),
     context_chars=_env_int("AGENT_CODE_MAX_CONTEXT_CHARS", 60000, 24000, 120000),
-    tokens=_env_int("AGENT_CODE_MAX_TOKENS_PER_RUN", 60000, 12000, 120000),
+    # 这里的 token 是**每次模型调用的 usage 累加**（prompt + completion），
+    # 上下文越滚越大，20 轮实测要 90–100k。原来给 60k，第 13 轮就撞墙、
+    # 文件改了一半停下——预算写 20 轮却跑不到 20 轮，等于没设。
+    tokens=_env_int("AGENT_CODE_MAX_TOKENS_PER_RUN", 120000, 12000, 200000),
 )
 
 
@@ -102,6 +105,14 @@ WORKSPACE_READ_TOOLS = ("repo_map", "list_dir", "read_file", "grep_code", "git_s
 WORKSPACE_EDIT_TOOLS = ("write_file", "edit_file")
 # 命令执行单独一组：比写文件更危险，必须用户再勾一次「允许跑命令」
 WORKSPACE_COMMAND_TOOLS = ("run_command",)
+# 任务清单不碰文件、不执行任何东西，只要开了任何一种工作区能力就注册：
+# 读代码看仓库同样可能是多步任务，用户需要知道它打算做几件事。
+TODO_TOOLS = ("update_todos",)
+
+# 这两类工具不受「不要重复调用」约束：
+# - 命令：改完代码重跑同一条测试是最正确的动作，拦掉它等于逼模型改参数绕过去
+# - 清单：整体提交是幂等的，重传一份同样的清单不会产生副作用
+REPEATABLE_TOOLS = WORKSPACE_COMMAND_TOOLS + TODO_TOOLS
 
 # 工具参数长度上限：检索类工具 4k 字就够，写入类要把整个文件内容塞进参数里，
 # 用同一个上限会把正常改动拦成「参数过长」。
@@ -321,10 +332,12 @@ def run_agent_stream(
 ):
     """执行一次 Agent，边跑边产出事件。
 
-    事件类型：start / round / reasoning / token / tool_start / file_edit / tool_end / limit / error / done。
+    事件类型：start / round / reasoning / token / tool_start / file_edit / todos /
+    command_ask / command_verdict / tool_end / limit / error / done。
     - round：每个模型轮次开始时发一次，前端用来标注「第 N 轮」
     - reasoning：模型的思考过程（仅支持的服务商返回，内容不进入回答正文）
     - file_edit：一次写入/修改落盘成功，带 path 与 diff，前端渲染成红绿行
+    - todos：任务清单整体刷新，带全部条目与完成数，前端重画进度卡
     done 事件带完整结果，调用方据此落库。
     """
     run_id = uuid.uuid4().hex
@@ -353,9 +366,11 @@ def run_agent_stream(
     # 这一组全是只读的：看结构、读文件、搜代码、看 git 状态与历史。
     # 不能改文件，也不能执行命令。
     # 开启「允许改代码」时自动带上读工具——改代码前必须能先读代码。
+    # 任务清单跟着同一道门：只要能看到工作区，就可能是多步任务。
     if allow_workspace or allow_code_edit or allow_command:
         tool_names = list(tool_names) + [
-            name for name in WORKSPACE_READ_TOOLS if name not in tool_names
+            name for name in WORKSPACE_READ_TOOLS + TODO_TOOLS
+            if name not in tool_names
         ]
 
     # 写入工具只在「允许改代码」时注册，且必然同时具备只读能力。
@@ -395,7 +410,9 @@ def run_agent_stream(
             "③ 勾选任务前先调用 list_learning_tasks 取得编号，不要猜；"
             "④ 写入后用一句话说明写了什么，方便用户核对。"
         )
-    if allow_workspace or allow_code_edit:
+    # 三个开关都会注册只读工具，提示词必须同步——只开「允许跑命令」时
+    # 工具在列表里却没有说明，模型会不知道该先看仓库结构。
+    if allow_workspace or allow_code_edit or allow_command:
         prompt += (
             "\n\n用户已开启「允许读项目文件」。你有七个只读工具：repo_map、list_dir、read_file、"
             "grep_code、git_status、git_diff、git_log。"
@@ -407,18 +424,32 @@ def run_agent_stream(
             "④ 引用代码必须写清「文件路径:行号」，没读到的内容不要编造；"
             "⑤ 如果路径被安全策略拒绝，如实告诉用户，不要反复换路径试探。"
         )
+
+    if allow_workspace or allow_code_edit or allow_command:
+        prompt += (
+            "\n\n你还有 update_todos（任务清单）。规则："
+            "① 开工前先判断：这次要动几个文件？**只要 ≥2 个，你的第一个工具调用就必须是 update_todos**，"
+            "先列 3–7 条计划（读哪些文件、改哪些地方、怎么验证），然后再去读文件；"
+            "只改一处、一句话能说清的小改动不要列清单，直接做；"
+            "② 每次调用都提交**完整清单**（不是增量追加），一条正在做标 active，其余 pending；"
+            "③ 每开始一项前把它改成 active；**每完成一项，就在紧接着的下一次工具调用里把它改成 done**，"
+            "不要攒到最后一次性改，更不要只在开头列一次就不管了——用户是靠这张表判断进度的；"
+            "④ 计划有变就整体重写清单，不要留下已经放弃的条目；"
+            "⑤ 列完清单要立刻动手，不要只列计划就结束回答。"
+        )
     if allow_code_edit:
         prompt += (
             "\n\n用户已开启「允许改代码」。除只读工具外，你还能调用 write_file（新建或整体重写）"
             "与 edit_file（按锚点局部替换）。规则："
             "① 只有用户明确要求修改代码时才动手，不要主动「顺手优化」；"
-            "② 改之前必须先读目标文件，不要凭记忆或猜测写代码；"
+            "② 改之前必须先读目标文件，不要凭记忆或猜测写代码；但本次运行里已经完整读过的文件不要重复读，直接改；"
             "③ 已有文件优先用 edit_file：old_string 逐字复制原文（含缩进与相邻行），保证在文件里唯一，"
             "一次只改一处；只有新建文件或确实需要整体重写时才用 write_file；"
             "④ 不要为了「顺便格式化」而整文件重写，diff 越干净越好；"
             "⑤ 工具报错（锚点不唯一、文件不存在、被沙箱拒绝）时，按错误提示修正后重试一次，"
             "仍失败就停下来如实说明，不要反复试探路径；"
-            "⑥ 每次改动后用一句话说明改了哪个文件、改了什么、为什么；"
+            "⑥ 每次改动后用一句话说明改了哪个文件、改了什么、为什么，说明从简；"
+            "不要复述工具输出、不要重贴刚读过的代码、不要逐步播报「接下来我要…」，用户能在过程面板里看到每一步；"
             "⑦ 红线（工具层直接拒绝，试也白试，别浪费轮次）：.env 等配置与密钥、*.db 及其 -wal/-shm、"
             "私钥与凭证文件、.git/.venv/node_modules/__pycache__ 等版本库与依赖目录、backups 与 uploads；"
             "不要靠换路径写法、改大小写、复制一份再改、把内容写进另一个文件名来绕过；"
@@ -520,6 +551,10 @@ def run_agent_stream(
                     "elapsed_ms": elapsed_ms, "preview": result_content[:700],
                 }
 
+        # 距离上次更新清单过了几个工具调用。实测模型列完计划就一路干活，
+        # 提醒拼在工具结果末尾它也会忽略，进度条从头到尾停在 0/N。
+        todo_idle = 0
+
         for round_no in range(1, budget.rounds + 1):
             rounds = round_no
             if should_stop():
@@ -532,6 +567,21 @@ def run_agent_stream(
                 steps.append({"kind": "limit", "round_no": round_no, "reason": f"本次 token 预算上限为 {budget.tokens}"})
                 yield {"type": "limit", "reason": f"已达本次 token 预算上限（{budget.tokens}）"}
                 break
+            # 系统提示每轮按原样重算，再把「进度提醒」拼在末尾：
+            # 这不是新增长期指令，只是本轮的一次催促，清掉就回到原始提示词。
+            open_todos = [item for item in (context.get("todos") or []) if item.get("status") != "done"]
+            if open_todos and todo_idle >= 2:
+                doing = next((item["text"] for item in open_todos if item["status"] == "active"), "")
+                total_todos = len(context["todos"])
+                done_todos = total_todos - len(open_todos)
+                messages[0]["content"] = prompt + (
+                    "\n\n【进度提醒】任务清单当前 %d/%d 完成%s。如果刚才那一步已经办完，"
+                    "现在就调用 update_todos 把它标成 done，再做下一步；不要等全部做完才更新。"
+                    % (done_todos, total_todos, "，正在做「%s」" % doing if doing else "")
+                )
+            else:
+                messages[0]["content"] = prompt
+
             remaining = deadline - time.monotonic()
             if remaining <= 1:
                 status = "timeout"
@@ -644,7 +694,7 @@ def run_agent_stream(
                     # 「不要重复调用」只适用于检索类工具：重复搜同一个词没有新信息。
                     # 命令不是这样——改完代码重跑同一条测试是最正确的动作，
                     # 拦掉它等于逼模型改参数绕过去（实测它就去掉了 -v 再跑一次）。
-                    if signature in seen_calls and name not in WORKSPACE_COMMAND_TOOLS:
+                    if signature in seen_calls and name not in REPEATABLE_TOOLS:
                         result_content = "工具执行失败：检测到完全重复的调用，请换一种检索条件或直接作答。"
                         result_data, ok = {}, False
                     elif tool is None or name not in tool_names:
@@ -716,14 +766,34 @@ def run_agent_stream(
                             "truncated": bool(result_data.get("diff_truncated")),
                             "diff": diff,
                         }
+                # 任务清单单独发一个 todos 事件：前端把它渲染成置顶的进度卡，
+                # 不混在工具流水里。整份清单随事件下发，前端直接重画。
+                if ok and name in TODO_TOOLS and isinstance(result_data, dict) and result_data.get("items"):
+                    yield {
+                        "type": "todos",
+                        "items": result_data.get("items"),
+                        "done": result_data.get("done", 0),
+                        "total": result_data.get("total", 0),
+                    }
                 yield {
                     "type": "tool_end", "tool": name, "ok": ok,
                     "elapsed_ms": elapsed_ms, "preview": result_content[:700],
                 }
+                # 清单提醒只发给模型，不进步骤预览——否则界面里每条工具结果都挂一句提醒。
+                # 实测模型列完清单就去干活，回来时忘了更新状态，进度条从头到尾停在 0/N。
+                message_content = result_content
+                if ok and name in WORKSPACE_EDIT_TOOLS + WORKSPACE_COMMAND_TOOLS:
+                    todos = context.get("todos") or []
+                    if any(item.get("status") != "done" for item in todos):
+                        message_content += (
+                            "\n（清单：这一步如果办完了某个条目，下一次工具调用请用 update_todos 标成 done。）"
+                        )
+
                 messages.append({
                     "role": "tool", "tool_call_id": call.get("id") or f"call_{len(messages)}",
-                    "name": name, "content": result_content,
+                    "name": name, "content": message_content,
                 })
+                todo_idle = 0 if (ok and name in TODO_TOOLS) else todo_idle + 1
 
             if status == "cancelled":
                 break

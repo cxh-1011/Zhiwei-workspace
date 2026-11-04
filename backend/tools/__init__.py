@@ -10,5 +10,6 @@ from . import workspace as _workspace  # noqa: F401
 from . import repo as _repo  # noqa: F401
 from . import edits as _edits  # noqa: F401
 from . import command as _command  # noqa: F401
+from . import todos as _todos  # noqa: F401
 
 __all__ = ["Tool", "ToolResult", "register", "get_tool", "all_schemas", "tool_names"]

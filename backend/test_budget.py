@@ -66,7 +66,9 @@ check("问答 token 12000", chat.tokens == 12000, chat.tokens)
 check("改代码 20 轮", code.rounds == 20, code.rounds)
 check("改代码单轮 6 个工具", code.tools_per_round == 6, code.tools_per_round)
 check("改代码 300 秒", code.seconds == 300, code.seconds)
-check("改代码 token 60000", code.tokens == 60000, code.tokens)
+# token 是每次调用 usage 的累加，20 轮实测要 90–100k，60k 会在第 13 轮就截断
+check("改代码 token 120000", code.tokens == 120000, code.tokens)
+check("改代码 token 上限够跑满 20 轮", code.tokens >= 90000, code.tokens)
 check("改代码上下文比问答宽", code.context_chars > chat.context_chars,
       (code.context_chars, chat.context_chars))
 check("改代码单次模型超时更宽松", code.llm_seconds > chat.llm_seconds,
