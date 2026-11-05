@@ -1477,6 +1477,11 @@ function collectSources(live, event) {
     (Array.isArray(event && event.steps) ? event.steps : []).forEach(step => {
         const data = step && step.result_data;
         if (data && Array.isArray(data.sources)) data.sources.forEach(push);
+        // B 站搜索结果不发 sources 事件，url 在 videos 里。不补这一段，回看历史时
+        // 视频卡片会整块消失，用户只能看到正文里的文字标题。
+        if (data && Array.isArray(data.videos)) {
+            data.videos.forEach(v => push({ title: "视频：" + (v.title || ""), url: v.url }));
+        }
     });
     return out.slice(0, 8);
 }

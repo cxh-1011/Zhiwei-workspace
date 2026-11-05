@@ -372,7 +372,7 @@ def _format(query: str, videos: list[dict], stats: dict, raw_count: int) -> str:
             "    UP主：%s\n"
             "    时长：%s%s ｜ 播放 %s ｜ 收藏 %s（收藏率 %.1f%%）｜ 发布 %s\n"
             "    内容详情：未知（接口只返回上面这些字段，视频里讲了什么、怎么讲，拿不到）\n"
-            "    %s"
+            "    链接：%s"
             % (index, item["title"][:120], item["author"] or "未知",
                item["duration"], _pace(int(item.get("minutes") or 0)),
                _num(play), _num(fav), rate,
@@ -401,10 +401,13 @@ def _format(query: str, videos: list[dict], stats: dict, raw_count: int) -> str:
         "只说「这是按播放和收藏综合排序、并过滤掉广告和低播放的结果」就够了。\n"
         "⑦ 按这个格式回答，每条理由只能从上面出现的数字里推：\n"
         "   1. 《标题》\n"
+        "      链接：把上面这一条的地址整行复制过来，一个字都不要改\n"
         "      UP主 xxx ｜ 时长 xx（约 N 天）｜ 播放 xx、收藏 xx ｜ 发布于 xx\n"
         "      理由：从「时长够不够短」「数据是否在真实区间」「发布时间是否偏旧」里挑一条，"
         "比如「17 小时的完整课，按每天一小时要半个多月，适合长期跟」或者"
         "「2019 年发布，基础语法不受影响，但新工具可能没讲」。\n"
+        "   每条都必须带链接，而且必须是这一条自己的地址：用户会按你说的第几条去点，"
+        "链接配错等于推荐错。宁可少列一条，也不要凭印象补一个地址。\n"
         "   写不出数字层面的理由时，就只列事实，不要补形容词。"
         % (query, raw_count, dropped, stats["ad"], stats["low_play"],
            stats["irrelevant"], stats["dup"], len(videos), "\n\n".join(blocks))

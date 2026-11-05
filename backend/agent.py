@@ -125,6 +125,69 @@ WEB_TOOLS = WEB_SEARCH_TOOLS + WEB_FETCH_TOOLS
 WEB_SEARCH_LIMIT = 3
 WEB_FETCH_LIMIT = 2
 
+# B 站视频链接。为什么要在交付前逐条核对：BV 号格式太规整（BV + 十位字母数字），
+# 模型随手拼一个也能拼得像真的，而它指向别人完全无关的视频。实测一条「推荐 Agent
+# 开发教程」的回答根本没调工具，三个链接点开分别是「18 岁的成人礼」「视频不存在」
+# 「征服卡包」。提示词约束不住（模型不调工具时就看不到工具输出里的约束），
+# 所以这里加硬闸：只放行本次工具真实返回过的视频，其余摘掉可点性。
+BILI_VIDEO_RE = re.compile(
+    r"https?://(?:www\.|m\.)?bilibili\.com/video/(BV[0-9A-Za-z]{10})", re.I)
+BILI_LINK_RE = re.compile(
+    r"https?://(?:www\.|m\.)?bilibili\.com/video/BV[0-9A-Za-z]{10}[^\s<>()（）\[\]【】\"'，。；、]*",
+    re.I)
+
+
+def _verified_video_ids(steps: list[dict]) -> set[str]:
+    """本次运行里，工具真的返回过的 BV 号。"""
+    ids: set[str] = set()
+    for step in steps:
+        data = step.get("result_data")
+        if not isinstance(data, dict):
+            continue
+        for video in (data.get("videos") or []):
+            if not isinstance(video, dict):
+                continue
+            match = BILI_VIDEO_RE.search(str(video.get("url") or ""))
+            if match:
+                ids.add(match.group(1).upper())
+    return ids
+
+
+def _drop_unverified_video_links(reply: str, verified: set[str]) -> tuple[str, int]:
+    """把正文里没被工具证实过的 B 站视频链接降级成纯文字，返回 (新正文, 摘掉的条数)。
+
+    只摘链接、不删标题：标题是模型写的，删掉会让整段话读不通；而链接是唯一
+    能"一点就穿帮"的东西，摘掉它，用户就不会被送到一个无关视频上。
+    """
+    removed = 0
+
+    def verified_url(url: str) -> bool:
+        match = BILI_VIDEO_RE.search(url)
+        return bool(match) and match.group(1).upper() in verified
+
+    # 先处理 markdown 链接：[标题](url)。标题留着，括号连同链接一起换成标题文字。
+    def markdown(match):
+        nonlocal removed
+        label, url = match.group(1), match.group(2)
+        if "bilibili.com/video" not in url.lower() or verified_url(url):
+            return match.group(0)
+        removed += 1
+        return label.strip() or "（这个视频我没核实过）"
+
+    text = re.sub(r"\[([^\]\n]{1,200})\]\((https?://[^)\s]{1,500})\)", markdown, reply)
+
+    # 再扫剩下的裸地址（含 <a href="..."> 里的），一律换成一句说明，不留可点入口。
+    def bare(match):
+        nonlocal removed
+        url = match.group(0)
+        if verified_url(url):
+            return url
+        removed += 1
+        return "（这个视频我没核实过，链接已移除）"
+
+    return BILI_LINK_RE.sub(bare, text), removed
+
+
 # 工具参数长度上限：检索类工具 4k 字就够，写入类要把整个文件内容塞进参数里，
 # 用同一个上限会把正常改动拦成「参数过长」。
 MAX_ARGUMENT_CHARS = 4000
@@ -543,13 +606,21 @@ def run_agent_stream(
             "不要自己拼或凭印象写；"
             "⑤ 摘要里没有的信息不要编。没搜到就说没搜到，不要用常识补成看起来像查过的样子；"
             "⑥ 注意发布时间。问的是「最近」，结果却是一年前的，要主动说明；"
-            "⑦ 用户要「学习视频」「教程推荐」这类东西时，用 bilibili_search，"
+            "⑦ 用户要「学习视频」「教程推荐」这类东西时，第一件事就是调 bilibili_search，"
+            "不许先凭印象列一遍再补搜索；"
             "不要用 web_search 去搜 B 站——搜索引擎回来的多是「关注小编领资料」这种引流文，一条视频都没有。"
-            "推荐视频时绝对不要凭记忆写 UP 主名字、视频标题或集数，那些多半是编的；"
+            "推荐视频时绝对不要凭记忆写 UP 主名字、视频标题、集数或链接，那些多半是编的；"
             "只能引用 bilibili_search 实际返回的条目和它的数据（播放、收藏、时长、日期）。"
+            "链接必须从工具结果里整段复制，并且每一条推荐后面都要附上它自己的那条链接——"
+            "用户是按你说的第几条去点的，顺序对不上就等于给错了。"
+            "B 站链接长得很规整（BV 号就是「BV」加十位字母数字），"
+            "正因为规整，随手编一个也能拼出来，而它指向的是别人完全无关的视频——"
+            "用户点进去看到的是游戏录屏，再也不会相信你的推荐。所以没有工具结果在手时，"
+            "一个 BV 号都不要写；"
             "同样不要描述视频内容——讲了什么、第几集讲什么、语速快不快、有没有配套课件，"
             "工具一概看不到，编出来用户一打开就穿帮；"
-            "工具说没找到合适的，就直说没找到，并给出更具体的搜索词建议。"
+            "工具说没找到合适的、或者调用失败了，就直说这次没查到，并给出更具体的搜索词建议，"
+            "不要用一段看起来很全的推荐把失败盖过去。"
             % (WEB_SEARCH_LIMIT, WEB_FETCH_LIMIT)
         )
 
@@ -978,6 +1049,16 @@ def run_agent_stream(
 
     if status != "error" and visible_parts:
         reply = "\n\n".join(part for part in visible_parts if part.strip())
+
+    # 交付前的最后一道：B 站视频链接逐条对账。注意必须放在 visible_parts 拼接之后，
+    # 因为拼接会覆盖掉前面单轮的 reply。
+    if reply and "bilibili.com/video" in reply.lower():
+        reply, dropped_links = _drop_unverified_video_links(
+            reply, _verified_video_ids(steps))
+        if dropped_links:
+            reply += (
+                "\n\n> 注：上面有 %d 条视频链接不是这次检索返回的，我无法确认它们指向哪个视频，"
+                "已经把链接去掉了。要的话我现在按这个主题真搜一遍再给你。" % dropped_links)
 
     yield {
         "type": "done",
