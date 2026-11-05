@@ -821,6 +821,9 @@ function openChat(id) {
                         answer.className = "agent-answer";
                         answer.innerHTML = renderMarkdown(msg[3]);
                         bubble.appendChild(answer);
+                        // 回看历史时来源埋在 steps 里，捞出来照原样再挂一遍
+                        const past = collectSources(null, { steps: run.steps });
+                        if (past.length) bubble.appendChild(renderSources(past));
                         box.appendChild(bubble);
                         return;
                     }
@@ -1448,6 +1451,69 @@ function stopGeneration() {
 
 
 // 收尾：把流式纯文本换成 Markdown，并把过程面板定格成完整时间线
+// ---------------------------------------------------------------- 来源链接
+
+// 来源最后会变成 <a href>，只放行 http(s)：否则一个 javascript: 网址就是一个洞
+function isSafeSourceUrl(url) {
+    return /^https?:\/\//i.test(String(url || ""));
+}
+
+function hostOf(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch (_) { return ""; }
+}
+
+// 流式回答时来源在 live.sources 里；回看历史时来源埋在 steps 的 result_data 里。
+// 两条路都走这里，渲染出来才一致。
+function collectSources(live, event) {
+    const seen = new Set();
+    const out = [];
+    const push = item => {
+        const url = item && item.url;
+        if (!isSafeSourceUrl(url) || seen.has(url)) return;
+        seen.add(url);
+        out.push({ title: String(item.title || url), url: String(url) });
+    };
+    ((live && live.sources) || []).forEach(push);
+    (Array.isArray(event && event.steps) ? event.steps : []).forEach(step => {
+        const data = step && step.result_data;
+        if (data && Array.isArray(data.sources)) data.sources.forEach(push);
+    });
+    return out.slice(0, 8);
+}
+
+function renderSources(items) {
+    const wrap = document.createElement("div");
+    wrap.className = "source-list";
+    const head = document.createElement("div");
+    head.className = "source-head";
+    head.textContent = "参考来源 · " + items.length;
+    wrap.appendChild(head);
+    items.forEach((item, index) => {
+        const link = document.createElement("a");
+        link.className = "source-item";
+        link.href = item.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        const num = document.createElement("span");
+        num.className = "source-idx";
+        num.textContent = String(index + 1);
+        const body = document.createElement("span");
+        body.className = "source-body";
+        const title = document.createElement("span");
+        title.className = "source-title";
+        title.textContent = item.title;
+        const domain = document.createElement("span");
+        domain.className = "source-domain";
+        domain.textContent = hostOf(item.url);
+        body.appendChild(title);
+        body.appendChild(domain);
+        link.appendChild(num);
+        link.appendChild(body);
+        wrap.appendChild(link);
+    });
+    return wrap;
+}
+
 function finalizeStream(box, live, answer, event, buffer, question) {
 
     const hasSteps = Array.isArray(event.steps) && event.steps.length;
@@ -1494,6 +1560,13 @@ function finalizeStream(box, live, answer, event, buffer, question) {
         answer.innerHTML = renderMarkdown(reply);
 
     }
+
+    // 来源挂在回答下面：上面那段文字就是这些网页的结论，用户能点开核对。
+    // 位置在 markdown 之后、警示条之前——警示条说的是「这份回答可信度如何」，
+    // 应该排在最后，离眼睛最近。
+    const sources = collectSources(live, event);
+
+    if (sources.length) box.appendChild(renderSources(sources));
 
     // 自测回路：改过代码却没有一条命令跑成功。这不算失败，但结论不能当验证过用，
     // 所以在回答下面挂一条明确警示，而不是让模型自己一句「应该没问题」带过去。
@@ -1689,6 +1762,12 @@ async function sendMessage() {
 
                     case "todos":
                         liveTodos(live, event);
+                        break;
+
+                    // 来源链接先攒着，等回答渲染完再挂上去。
+                    // 中途插进去会被后面流出来的文字挤走，位置就乱了。
+                    case "sources":
+                        (live.sources = live.sources || []).push(...(event.items || []));
                         break;
 
                     // 改了代码却一条命令都没跑通，后端把「收尾」退回去了。
