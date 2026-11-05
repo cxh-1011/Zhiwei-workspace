@@ -4,7 +4,7 @@
 
 - `POST /chat` 是统一聊天入口，接受 `mode`：`chat`、`file`、`paper`，以及 `allow_writes`、`allow_workspace`、`allow_code_edit`、`allow_command`、`show_thinking`。
 - 千问通过 DashScope OpenAI 兼容接口 Function Calling 选择工具。
-- 工具都在 `backend/tools/` 注册：`web_search`、`fetch_url`、`scholarly_search`、`paper_search`、`search_uploaded_files`、`list_uploaded_files`。
+- 工具都在 `backend/tools/` 注册：`web_search`、`fetch_url`、`bilibili_search`、`scholarly_search`、`paper_search`、`search_uploaded_files`、`list_uploaded_files`。
 - `scholarly_search` 实时查询 Semantic Scholar 与 Crossref 的学术元数据，返回题名、作者、年份、摘要、DOI 和可用的开放获取链接。它不登录或抓取知网、IEEE Xplore、ScienceDirect，也不绕过付费全文权限。可选配置 `SEMANTIC_SCHOLAR_API_KEY` 提高 Semantic Scholar API 使用能力，`CROSSREF_MAILTO` 用于 Crossref polite pool。
 - 工具做搜索、检索、只读的代码与 git 查看、「学习档案写入」，以及（显式开启后）工作区文件写入与受限命令执行。命令执行不经 shell、三档分类、需确认的命令挂起等用户点选，详见[命令执行](#命令执行)。
 - 工具结果会回给千问；它可以继续调用工具，或生成最终回答。
@@ -265,6 +265,51 @@ classify_command(command, cwd)
 Agent 在 `tool_end` 之前发 `sources` 事件，只带 `{title, url}`，不把网页正文推给前端。前端 `collectSources` 合并流式与历史两条来源（历史从 `steps[].result_data.sources` 捞），`renderSources` 画成可点卡片；`isSafeSourceUrl` 只放行 http(s)，避免 `javascript:` 进 `href`。
 
 回归测试见 `backend/test_web_tools.py`（75 项，假客户端，不联网不花额度）。
+
+## B 站视频搜索
+
+`bilibili_search` 面向单一站点，存在的理由只有一个：通用搜索拿不到视频。实测 `web_search` 搜「B站 Python 教学」，回来的是「关注小编回复 222 领资料」，一条视频都没有。
+
+### 会话与风控
+
+裸请求搜索接口必得 `412`。解法是用同一个 opener 先 GET `https://www.bilibili.com/`，拿到 `buvid3` 后再请求；会话在进程内复用（`_SESSION`），只在 412 时重建一次并 `sleep(0.8)` 后重试——**只重试一次**，连试只会让风控更严。UA 必须是浏览器 UA，`Python-urllib` 直接拒。
+
+### 过滤
+
+按顺序四层：`AD_WORDS`（接单/领福利/加微信…）→ 播放 < 30000 → 主题词未命中 → 收藏为 0。
+
+相关性判的是**主题词**而不是任意词：`_core_token` 取查询里第一个非泛词（`STOP_WORDS` 里是「教程/入门/推荐/学习」这类），标题必须含它。否则搜「提示词 教程」时，一个只含「教程」的 AI 漫剧视频也会通过——这是实测发生过的。
+
+去重按 `(author, 标题去符号前 10 字)`：同一门课换标题重复上榜很常见，实测黑马程序员占了 3 条。
+
+### 打分
+
+```
+score = sqrt(favorites) * sqrt(play) * relevance * penalty
+penalty: 收藏率 > 50% → 0.3；> 25% → 0.6；否则 1.0
+```
+
+不用收藏率当主排序：小样本下它会失真（300 播放 30 收藏 = 10%，和真课并列）。几何平均对两项都敏感，只刷一项刷不动。但几何平均挡不住「两项都虚高」——实测有收藏 114 万 / 播放 74 万（154%）的视频，绝对值接近真课，几何平均照样把它顶到第一，所以加 `penalty` 打折。
+
+### 幻觉治理
+
+工具只返回七个字段（标题、UP 主、时长、播放、收藏、日期、链接），但模型会主动补内容描述。三轮真机：
+
+| 轮次 | 编造内容 | 措施 |
+|---|---|---|
+| 1 | 「全程无快进无跳步」「每讲带代码演示」「把列表比作购物清单」 | 每条加 `内容详情：未知`；末尾加具体反例句 |
+| 2 | 降级为「内容应含 pip」「大概率覆盖 3.12」 | 加格式模板，理由只能从数字推 |
+| 3 | 按模板写，结尾主动声明「具体内容工具无法获取」 | — |
+
+结论：**抽象禁令（「不要描述」）压不住，具体结构才压得住**。有效的两招是把「这里没有信息」写进数据结构（每条一行 `内容详情：未知`），以及给一个只允许写数字理由的输出模板。另外禁止它解释筛选标准——实测它编出过「按收藏率≥4%筛选」，而实际算法是几何平均，说错了反而误导。
+
+时长换算也不交给模型：实测它把 123 小时的合集说成「第 2 到 5 天看完」。`_pace()` 直接算好「按每天学 1 小时要 N 天」写进输出。
+
+### 接入
+
+`WEB_SEARCH_TOOLS` 里加了它，所以和 `web_search` 共用 3 次上限（`_web_quota` 按 `name in WEB_SEARCH_TOOLS` 分桶）。视频条目在 `tool_end` 前转成 `sources` 事件，标题加「视频：」前缀，前端零改动复用现有卡片。
+
+回归测试见 `backend/test_bilibili_search.py`（77 项，假响应，不联网）。
 
 ## 部署
 
