@@ -119,7 +119,7 @@ REPEATABLE_TOOLS = WORKSPACE_COMMAND_TOOLS + TODO_TOOLS
 # 联网工具与次数上限。上限放在 agent 层而不是工具里：单个工具看不见整轮对话，
 # 计数器必须跨调用。3 次搜索 + 2 个网页够答绝大多数问题；再多基本是原地打转，
 # 而且每次都要从额度里扣钱、往上下文里塞摘要。
-WEB_SEARCH_TOOLS = ("web_search",)
+WEB_SEARCH_TOOLS = ("web_search", "bilibili_search")
 WEB_FETCH_TOOLS = ("fetch_url",)
 WEB_TOOLS = WEB_SEARCH_TOOLS + WEB_FETCH_TOOLS
 WEB_SEARCH_LIMIT = 3
@@ -380,7 +380,7 @@ def run_agent_stream(
     deadline = started + budget.seconds
     steps: list[dict] = []
     tool_names = allowed_tools if allowed_tools is not None else {
-        "chat": ["web_search", "fetch_url", "scholarly_search", "paper_search",
+        "chat": ["web_search", "fetch_url", "bilibili_search", "scholarly_search", "paper_search",
                  "search_uploaded_files", "list_uploaded_files"],
         "file": ["search_uploaded_files", "list_uploaded_files"],
         "paper": ["scholarly_search", "paper_search", "web_search", "fetch_url"],
@@ -532,7 +532,8 @@ def run_agent_stream(
     # 而这个 agent 手里有写文件和跑命令的权限，被网页牵着走的代价比答错大得多。
     if any(name in tool_names for name in WEB_TOOLS):
         prompt += (
-            "\n\n你还能联网：web_search 搜网页，fetch_url 打开链接读正文。规则："
+            "\n\n你还能联网：web_search 搜网页，fetch_url 打开链接读正文，"
+            "bilibili_search 搜 B 站教学视频。规则："
             "① 只在需要时效性事实、或用户明确要求查证时联网；写代码、翻译、常识问答直接做，不要搜；"
             "② 搜索只给摘要，需要细节（长文档、官方说明、更新日志、用户给的链接）就用 fetch_url 打开"
             "最相关的那一两个，不要挨个全开；一次回答最多搜 %d 次、打开 %d 个网页，超了会被拒绝；"
@@ -541,7 +542,14 @@ def run_agent_stream(
             "④ 用了网页信息就要给出处，写成「（来源：标题，链接）」，链接必须是工具结果里出现过的原始地址，"
             "不要自己拼或凭印象写；"
             "⑤ 摘要里没有的信息不要编。没搜到就说没搜到，不要用常识补成看起来像查过的样子；"
-            "⑥ 注意发布时间。问的是「最近」，结果却是一年前的，要主动说明。"
+            "⑥ 注意发布时间。问的是「最近」，结果却是一年前的，要主动说明；"
+            "⑦ 用户要「学习视频」「教程推荐」这类东西时，用 bilibili_search，"
+            "不要用 web_search 去搜 B 站——搜索引擎回来的多是「关注小编领资料」这种引流文，一条视频都没有。"
+            "推荐视频时绝对不要凭记忆写 UP 主名字、视频标题或集数，那些多半是编的；"
+            "只能引用 bilibili_search 实际返回的条目和它的数据（播放、收藏、时长、日期）。"
+            "同样不要描述视频内容——讲了什么、第几集讲什么、语速快不快、有没有配套课件，"
+            "工具一概看不到，编出来用户一打开就穿帮；"
+            "工具说没找到合适的，就直说没找到，并给出更具体的搜索词建议。"
             % (WEB_SEARCH_LIMIT, WEB_FETCH_LIMIT)
         )
 
@@ -862,6 +870,14 @@ def run_agent_stream(
                 if ok and name in WEB_TOOLS and isinstance(result_data, dict):
                     found = [item for item in (result_data.get("sources") or [])
                              if isinstance(item, dict) and item.get("url")]
+                    # B 站视频也走这条路：前端已有「标题 + 域名」卡片，用户点开就能看。
+                    # 加前缀是为了在一堆网页里认得出哪几条是视频。
+                    for video in (result_data.get("videos") or []):
+                        if isinstance(video, dict) and video.get("url"):
+                            found.append({
+                                "title": "视频：" + str(video.get("title") or "")[:200],
+                                "url": str(video["url"])[:1000],
+                            })
                     if found:
                         yield {
                             "type": "sources",
