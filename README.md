@@ -166,6 +166,7 @@ Agent 工具提供搜索、资料检索、学习档案写入、工作区读取�
 │   ├── test_video_links.py     # 视频链接对账：编造的 BV 号在交付前被摘掉
 │   ├── test_course.py          # 课程树、依赖推荐、前置提示、路径校验与接口边界
 │   ├── test_recall.py          # 记忆检索：切词、排序、三类来源、Agent 接线、容量不变
+│   ├── test_backup.py          # 数据库备份：每天一份、不覆盖当天、剪枝、失败不拦启动
 │   ├── test_providers.py       # 服务商切换、Key 掩码、视觉降级的离线测试
 │   ├── test_model_api.py       # 模型配置接口的鉴权与 CRUD 测试
 │   ├── uploads/                # 运行时上传文件，不纳入 Git
@@ -291,6 +292,23 @@ location / {
 ```
 
 将后端、前端和依赖清单上传到服务器；在服务器自己的 `backend/.env` 中配置密钥；使用 Python 3.11 建立虚拟环境并安装 `backend/requirements.txt`；用宝塔 Python 项目管理或 systemd 等进程管理方式启动 Uvicorn。上线前备份旧代码、`.env`、`backend/chats.db`、`backend/uploads/` 和 `backend/paper_index/`。`.env`、数据库、上传文件和索引均是运行数据，不包含在仓库中。
+
+## 数据备份
+
+`backend/chats.db` 一个文件装着全部对话、课程进度、长期记忆和 API 配置，没有第二份；它不像代码那样丢了能从 git 找回。所以后端**每次启动时自动存一份快照**到 `backups/db/`：
+
+- 按日期命名（`chats-2026-11-06.db`），一天一份，只留最近 7 天，更早的自动删除；
+- 同一天重启多次**不会覆盖**当天已有的那份——当天第一次启动前的状态，通常才是想回退到的那个。如果每次重启都覆盖，手滑删了数据再重启就会把好备份冲掉；
+- 走 SQLite 自带的备份接口，不是直接复制文件：万一还有别的进程在写（命令行、另一个实例），复制可能拿到写了一半的页；
+- 空库不备份（刚建出来没有对话，占位没意义）；备份失败只写一条日志，绝不阻止服务启动。
+
+恢复时先停服务，把对应日期的文件复制回去：
+
+```bash
+cp backups/db/chats-2026-11-06.db backend/chats.db
+```
+
+备份目录在 `.gitignore` 里，不会进仓库（含个人对话，也有体积）。要改保留天数就改 `backend/database.py` 的 `BACKUP_KEEP`。
 
 ## 主要接口
 

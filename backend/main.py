@@ -45,7 +45,7 @@ from config import (
 from paper_agent import load_paper, ensure_db_loaded, PAPER_SOURCE_PATH, get_paper_chunk_count
 
 from database import (
-    init_db, create_chat, get_chats, delete_chat, save_message,
+    init_db, backup_db, create_chat, get_chats, delete_chat, save_message,
     get_messages, update_chat_title, get_recent_messages, save_agent_run,
     get_agent_run, get_agent_runs_for_chat, add_memory, list_memories, delete_memory,
     count_memories,
@@ -168,6 +168,9 @@ async def require_login(request: Request, call_next):
 # ======================
 # 初始化数据库
 # ======================
+
+# 先备份再建表：备份的应该是「上一轮运行结束后」的数据，不是刚建出来的空壳
+backup_db()
 
 init_db()
 

@@ -1,11 +1,22 @@
 import os
 import sqlite3
 import json
+import logging
+import time
+
+
+logger = logging.getLogger("ai_robot.database")
 
 
 # 数据库文件路径（基于本文件定位，避免在不同目录启动时又建一个新库）
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chats.db")
+
+# 备份目录在项目根的 backups/db 下，和代码回滚快照分开放
+BACKUP_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backups", "db"
+)
+BACKUP_KEEP = 7
 
 
 
@@ -751,3 +762,83 @@ def list_course_questions(course_id, chapter_id=None, limit=30):
         {"id": r[0], "chapter_id": r[1], "question": r[2], "answer": r[3], "created_at": r[4]}
         for r in rows
     ]
+
+
+# ======================
+# 备份
+# ======================
+#
+# 整个站的长期价值都在一个 chats.db 里：几个月的对话、课程进度、考过的问题、
+# 手动记下的偏好。它没有副本——硬盘坏一次、手滑删一次就全没了，而这些数据
+# 不像代码可以从 git 恢复。
+#
+# 所以每次启动时留一份快照。刻意做得「不精确」：
+# - 一天只留一份，当天重启多次不再覆盖。当天第一次启动前的状态往往才是
+#   最想要的那个；如果每次重启都覆盖，手滑删完数据再重启就把好备份冲掉了。
+# - 只留最近 7 天。备份的价值在于「最近能回退」，不是做归档。
+
+
+def _db_has_data(db_file: str) -> bool:
+    """判断库里有没有真实内容。刚 init_db 出来的空壳不值得占一个备份位。"""
+    conn = sqlite3.connect(db_file)
+    try:
+        return conn.execute("SELECT count(*) FROM chats").fetchone()[0] > 0
+    except sqlite3.Error:
+        # 表还没建，说明是全新的库
+        return False
+    finally:
+        conn.close()
+
+
+def _prune_backups(dest_dir: str, keep: int) -> None:
+    """按文件名里的日期排序，删掉最旧的。名字带 ISO 日期，字母序就是时间序。"""
+    names = sorted(
+        name for name in os.listdir(dest_dir)
+        if name.startswith("chats-") and name.endswith(".db")
+    )
+    if keep <= 0:
+        stale = names
+    else:
+        stale = names[:-keep]
+    for name in stale:
+        try:
+            os.remove(os.path.join(dest_dir, name))
+        except OSError as exc:
+            logger.warning("旧备份删不掉 %s：%s", name, exc)
+
+
+def backup_db(dest_dir: str | None = None, keep: int = BACKUP_KEEP,
+              day: str | None = None) -> str | None:
+    """把当前库整份快照到备份目录，一天一份，只留最近 keep 天。
+
+    返回备份文件路径；跳过（当天已有/空库/库不存在）或失败时返回 None。
+    **任何异常都只记日志，绝不抛出**——备份不该成为服务启动的拦路石。
+    """
+    target_dir = dest_dir or BACKUP_DIR
+    try:
+        if not os.path.exists(DB_PATH) or not _db_has_data(DB_PATH):
+            return None
+
+        os.makedirs(target_dir, exist_ok=True)
+        target = os.path.join(target_dir, "chats-%s.db" % (day or time.strftime("%Y-%m-%d")))
+        if os.path.exists(target):
+            return None
+
+        # 用 sqlite 自带的备份接口，而不是直接复制文件：万一有别的进程
+        # （命令行、另一个实例）正在写，复制可能拿到写了一半的页。
+        src = sqlite3.connect(DB_PATH)
+        try:
+            dst = sqlite3.connect(target)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        _prune_backups(target_dir, keep)
+        logger.info("数据库已备份到 %s", target)
+        return target
+    except Exception as exc:  # noqa: BLE001 - 备份失败不能拖垮启动
+        logger.warning("数据库备份失败（不影响启动）：%s", exc)
+        return None
