@@ -48,6 +48,7 @@ from database import (
     init_db, create_chat, get_chats, delete_chat, save_message,
     get_messages, update_chat_title, get_recent_messages, save_agent_run,
     get_agent_run, get_agent_runs_for_chat, add_memory, list_memories, delete_memory,
+    count_memories,
     save_learning_plan, list_learning_plans, set_learning_plan_status,
     delete_learning_plan, get_learning_plan, add_learning_tasks, list_learning_tasks,
     set_learning_task_status, delete_learning_task, replace_unfinished_learning_tasks,
@@ -282,6 +283,34 @@ def logout(response: Response):
 # 聊天
 # ======================
 
+MEMORY_INJECT_LIMIT = 20
+
+
+def _memory_context(include_plans: bool = True) -> str:
+    """拼进 system prompt 的记忆片段。
+
+    只带最近 20 条，且**不随记忆条数增长而变长**。这是刻意的：把 100 条全塞进去，
+    每轮对话都要为「可能用得上」付 token，条数越多越挤占当前问题，模型反而更容易
+    漏掉真正相关的那条。更早的记忆改成按问题检索（recall_memory）。
+
+    末尾那句总数不是装饰：模型看不见「还有多少条没带进来」，就会把「不在上下文」
+    当成「没记过」，一口回绝「你之前没跟我说过这个」。
+    """
+    memories = list_memories(MEMORY_INJECT_LIMIT)
+    context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
+    total = count_memories()
+    if total > len(memories):
+        context += (
+            "\n（以上只是最近 %d 条，共 %d 条；更早的没有放进上下文，"
+            "需要时用 recall_memory 检索）" % (len(memories), total)
+        )
+    if include_plans:
+        active_plans = [row for row in list_learning_plans(10) if row[4] == "active"][:3]
+        if active_plans:
+            context += "\n当前学习计划：\n" + "\n".join(f"- {row[1]}：{row[2]}" for row in active_plans)
+    return context
+
+
 def _chat_context(message: Message) -> dict:
     """校验请求并准备上下文。/chat 与 /chat/stream 共用，保证两条路径行为一致。"""
     if message.mode not in {"chat", "file", "paper", "tutor"}:
@@ -318,11 +347,7 @@ def _chat_context(message: Message) -> dict:
         for role, content in get_recent_messages(message.chat_id, 12)
         if role in {"user", "ai"}
     ]
-    memories = list_memories(20)
-    memory_context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
-    active_plans = [row for row in list_learning_plans(10) if row[4] == "active"][:3]
-    if active_plans:
-        memory_context += "\n当前学习计划：\n" + "\n".join(f"- {row[1]}：{row[2]}" for row in active_plans)
+    memory_context = _memory_context()
 
     return {
         "history": history,
@@ -856,9 +881,8 @@ def _active_paper_matches(digest: str) -> bool:
 def _run_legacy_agent(question: str, chat_id: int | None, mode: str, filename: str | None = None):
     try:
         history = []
-        memories = list_memories(20)
-        context = "\n".join(f"[{row[2]}] {row[1]}" for row in memories)
-        result = run_agent(question, history=history, mode=mode, filename=filename, memory_context=context)
+        result = run_agent(question, history=history, mode=mode, filename=filename,
+                           memory_context=_memory_context())
         if chat_id is not None:
             update_chat_title(chat_id, question[:15])
             save_message(chat_id, "user", question)
@@ -914,11 +938,14 @@ def undo_code_edits(run_id: str):
 
 @app.get("/memories")
 def memories():
-    return {"items": [
+    """记忆列表。顺带告诉前端「每轮只带最近几条」，界面上就能把机制说清楚，
+    省得用户以为存进来 100 条就全都会被记住。"""
+    items = [
         {"id": row[0], "content": row[1], "category": row[2], "created_at": row[3],
          "source": row[4] if len(row) > 4 else "user"}
         for row in list_memories(100)
-    ]}
+    ]
+    return {"items": items, "total": len(items), "inject_limit": MEMORY_INJECT_LIMIT, "cap": 100}
 
 
 @app.post("/memories")

@@ -855,6 +855,7 @@ const TOOL_LABELS = {
     search_uploaded_files: "检索上传资料",
     list_uploaded_files: "查看资料列表",
     remember: "记住这条信息",
+    recall_memory: "检索记忆",
     list_learning_tasks: "读取任务列表",
     set_task_status: "更新任务状态",
     list_dir: "查看目录",
@@ -905,7 +906,8 @@ const ARG_LABELS = {
     command: "命令",
     cwd: "目录",
     timeout: "超时",
-    items: "清单"
+    items: "清单",
+    scope: "范围"
 };
 
 function formatArgValue(value) {
@@ -3149,45 +3151,84 @@ function closeLearningHub() {
     if (dialog?.open) dialog.close();
 }
 
+// 记忆面板的本地状态：列表只拉一次，搜索框在本地过滤。
+// 为什么要在这层过滤而不是加个搜索接口：记忆上限 100 条，全量在内存里筛是微秒级，
+// 请求一次反而更慢。真正需要检索的是「助手那一侧」——它每轮只带 20 条进上下文，
+// 更早的要靠 recall_memory，那才是这次改动的重点。
+let memoryItems = [];
+
+function renderMemories(items, total) {
+    const box = $("memoryList");
+    if (!box) return;
+    box.replaceChildren();
+    if (!items.length) {
+        const hint = document.createElement("div");
+        hint.className = "empty-hint";
+        hint.textContent = total
+            ? "没有匹配的记忆，换个关键词试试。"
+            : "还没有保存的记忆。";
+        box.appendChild(hint);
+        return;
+    }
+    items.forEach(item => {
+        const card = document.createElement("article");
+        card.className = "hub-item";
+        const category = document.createElement("span");
+        category.className = "hub-category";
+        category.textContent = item.category || "记忆";
+        // 助手写入的记忆单独标出来，方便你审计和删除
+        if (item.source === "agent") {
+            const badge = document.createElement("span");
+            badge.className = "hub-source";
+            badge.textContent = "助手写入";
+            badge.title = "这是助手根据你的要求写入的，可随时删除";
+            category.after(badge);
+        }
+        const content = document.createElement("p");
+        content.textContent = item.content;
+        const remove = document.createElement("button");
+        remove.className = "hub-remove";
+        remove.textContent = "删除";
+        remove.onclick = async () => {
+            try {
+                await apiJson("/memories/" + item.id, { method: "DELETE" });
+                loadMemories();
+            } catch (error) { alert("删除记忆失败：" + error.message); }
+        };
+        card.append(category, remove, content);
+        box.appendChild(card);
+    });
+}
+
+// 前端过滤和助手检索用同一套朴素规则：包含即命中，够用且可解释。
+// 不做模糊匹配是故意的——搜「数据集」却出来「数据缺口」，用户会以为搜错了。
+function filterMemories() {
+    const keyword = ($("memorySearch")?.value || "").trim().toLowerCase();
+    if (!keyword) {
+        renderMemories(memoryItems, memoryItems.length);
+        return;
+    }
+    const matched = memoryItems.filter(item =>
+        `${item.category || ""} ${item.content || ""}`.toLowerCase().includes(keyword)
+    );
+    renderMemories(matched, memoryItems.length);
+}
+
 async function loadMemories() {
     const box = $("memoryList");
     if (!box) return;
     try {
         const data = await apiJson("/memories");
-        box.replaceChildren();
-        const items = data.items || [];
-        if (!items.length) {
-            box.innerHTML = '<div class="empty-hint">还没有保存的记忆。</div>';
-            return;
+        memoryItems = data.items || [];
+        // 把「只带最近 20 条、其余靠检索」这件事写在界面上。
+        // 不写清楚，用户会以为存了 100 条助手就全记得，然后怪它答错。
+        const help = $("memoryHelp");
+        if (help && data.inject_limit) {
+            help.textContent = `只保存你主动添加的内容。共 ${memoryItems.length} / ${data.cap} 条；`
+                + `每轮对话固定只带最近 ${data.inject_limit} 条进上下文，更早的由助手按你的问题现场检索——`
+                + `不靠堆条数，靠查得到。`;
         }
-        items.forEach(item => {
-            const card = document.createElement("article");
-            card.className = "hub-item";
-            const category = document.createElement("span");
-            category.className = "hub-category";
-            category.textContent = item.category || "记忆";
-            // 助手写入的记忆单独标出来，方便你审计和删除
-            if (item.source === "agent") {
-                const badge = document.createElement("span");
-                badge.className = "hub-source";
-                badge.textContent = "助手写入";
-                badge.title = "这是助手根据你的要求写入的，可随时删除";
-                category.after(badge);
-            }
-            const content = document.createElement("p");
-            content.textContent = item.content;
-            const remove = document.createElement("button");
-            remove.className = "hub-remove";
-            remove.textContent = "删除";
-            remove.onclick = async () => {
-                try {
-                    await apiJson("/memories/" + item.id, { method: "DELETE" });
-                    loadMemories();
-                } catch (error) { alert("删除记忆失败：" + error.message); }
-            };
-            card.append(category, remove, content);
-            box.appendChild(card);
-        });
+        filterMemories();
     } catch (error) {
         box.textContent = "读取记忆失败：" + error.message;
     }

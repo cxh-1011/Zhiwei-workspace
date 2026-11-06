@@ -72,8 +72,9 @@
   <dialog id="learningHub" class="learning-hub">
     <div class="learning-head"><div><span class="eyebrow">YOUR LEARNING SPACE</span><h2>学习档案</h2><p>由你确认保存的长期记忆与学习计划会用于个性化回答。</p></div><button class="hub-close" onclick="closeLearningHub()" aria-label="关闭">×</button></div>
     <div class="learning-grid">
-      <section class="learning-section"><h3>长期记忆</h3><p class="learning-help">只保存你主动添加的内容；回答时当前模型会参考这些信息。</p>
+      <section class="learning-section"><h3>长期记忆</h3><p class="learning-help" id="memoryHelp">只保存你主动添加的内容。每轮对话只带最近 20 条在上下文里，更早的由助手按问题现场检索——不靠堆条数，靠查得到。</p>
         <form id="memoryForm" onsubmit="saveLearningMemory(event)"><input id="memoryCategory" maxlength="40" placeholder="分类，例如：研究方向" value="偏好"><textarea id="memoryContent" maxlength="1200" required placeholder="例如：我刚读研一，正在学习机器学习基础。"></textarea><button class="hub-primary" type="submit">保存记忆</button></form>
+        <input id="memorySearch" class="hub-search" type="search" placeholder="检索记忆，例如：研究方向 / 数据集" oninput="filterMemories()">
         <div id="memoryList" class="hub-list"><div class="empty-hint">正在加载…</div></div>
       </section>
       <section class="learning-section"><h3>任务规划</h3><p class="learning-help">写下目标，当前模型会生成可勾选待办；完成后可按进度重新规划。</p>

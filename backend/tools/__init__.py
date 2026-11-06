@@ -8,6 +8,7 @@ from . import web_search as _web_search  # noqa: F401
 from . import fetch_url as _fetch_url  # noqa: F401
 from . import bilibili_search as _bilibili_search  # noqa: F401
 from . import archive as _archive  # noqa: F401
+from . import recall as _recall  # noqa: F401
 from . import workspace as _workspace  # noqa: F401
 from . import repo as _repo  # noqa: F401
 from . import edits as _edits  # noqa: F401

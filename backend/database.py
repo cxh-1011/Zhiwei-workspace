@@ -508,6 +508,37 @@ def delete_memory(memory_id):
     return deleted
 
 
+def count_memories():
+    """记忆总条数。用来在提示词里说清「只在上下文里放了最近 N 条，另有 M 条靠检索」。"""
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    conn.close()
+    return int(total)
+
+
+# 检索历史对话时扫的是 agent_runs 而不是 messages：
+# messages 只有 role+content，一句问一句答各占一行、没有时间戳，检索出来是一堆
+# 断句；agent_runs 天然是「问 + 答」成对的，还带 created_at，按时间说「你上次
+# 在 11 月 3 日问过」才说得出口。
+def list_runs_for_recall(limit=1000):
+    """给检索用的问答对索引。reply 截断到 400 字：够判断相关性，不至于把整篇回答读进内存。"""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT run_id,chat_id,question,substr(COALESCE(reply,''),1,400),created_at "
+        "FROM agent_runs ORDER BY rowid DESC LIMIT ?",
+        (max(1, min(int(limit), 5000)),),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_runs():
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+    conn.close()
+    return int(total)
+
+
 def save_learning_plan(title, goal, content):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

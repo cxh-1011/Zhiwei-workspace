@@ -33,6 +33,9 @@
 .model-pill.warn{border-color:#f0dada;background:#fff7f7;color:#a84949}
 .model-pill.warn .model-dot{background:#d76c6c}
 .learning-section select{width:100%;padding:10px 11px;border:1px solid #e6e8ed;border-radius:8px;background:#fff;color:#303641;font-size:12px}
+/* 记忆检索框：只做本地过滤，不发请求——100 条在浏览器里筛比往返一次快得多 */
+.hub-search{margin:0 0 12px}
+.hub-more{margin:8px 0 0;color:#858b96;font-size:11px;line-height:1.6}
 .provider-item.active{border-color:#dfe3f7;background:#fbfbff}
 .provider-title{display:flex;align-items:center;gap:8px;color:#3a4150;font-size:12px}
 .provider-badge{padding:2px 7px;border-radius:20px;background:#eef0fa;color:#5c66b8;font-size:9px}
