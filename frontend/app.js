@@ -2948,6 +2948,13 @@ async function submitLogin(event) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ password })
         });
+        // 从学习台被弹回来登录的，登录完直接送他回去，不用他自己再找一次入口。
+        // 只接受站内单斜杠路径，//evil.com 这种协议相对地址要挡掉。
+        const next = new URLSearchParams(location.search).get("next");
+        if (next && next.startsWith("/") && !next.startsWith("//")) {
+            location.href = next;
+            return;
+        }
         enterWorkspace();
     } catch (error) {
         showLoginGate(error.message || "登录失败，请检查密码。 ");
@@ -3052,6 +3059,82 @@ function restoreAllowWrites() {
     try { cmdBox.checked = localStorage.getItem("allowCommand") === "1"; } catch (_) { cmdBox.checked = false; }
     allowCommand = Boolean(cmdBox.checked);
     cmdBox.closest(".write-toggle")?.classList.toggle("on", allowCommand);
+
+    // 恢复完再同步按钮：老用户 localStorage 里可能只开过其中一两项，
+    // 这时按钮要显示「部分」，不能装作全开，否则他会以为跑命令也开了。
+    syncExpertButton();
+}
+
+// ---------- 专家模式 ----------
+// 五个勾选框背后其实是四类权限（写档案 / 读代码 / 改代码 / 跑命令）加一个显示思考。
+// 新手分不清「读代码」和「改代码」，也常以为勾了改代码就能跑测试，于是干脆收成一个按钮：
+// 要么全开，要么全关。勾选框留在 DOM 里承载状态，逻辑全部复用原来的 onXxxChange，
+// 不另写一套权限判断——两套判断迟早会不一致。
+const EXPERT_ITEMS = [
+    { id: "allowWrites", name: "记录", apply: () => onAllowWritesChange() },
+    { id: "allowWorkspace", name: "读代码", apply: () => onAllowWorkspaceChange() },
+    { id: "allowCodeEdit", name: "改代码", apply: () => onAllowCodeEditChange() },
+    { id: "allowCommand", name: "跑命令", apply: () => onAllowCommandChange() },
+    { id: "showThinking", name: "思考", apply: () => onShowThinkingChange() },
+];
+
+function expertState() {
+    const boxes = EXPERT_ITEMS.map((item) => $(item.id)).filter(Boolean);
+    if (!boxes.length) return "off";
+    const opened = boxes.filter((box) => box.checked).length;
+    if (opened === boxes.length) return "on";
+    return opened === 0 ? "off" : "partial";
+}
+
+function expertNames() {
+    return EXPERT_ITEMS
+        .filter((item) => $(item.id)?.checked)
+        .map((item) => item.name)
+        .join(" · ");
+}
+
+function syncExpertButton() {
+    const button = $("expertToggle");
+    if (!button) return;
+    const state = expertState();
+    button.dataset.state = state;
+    button.setAttribute("aria-pressed", state === "on" ? "true" : "false");
+    const label = $("expertLabel");
+    if (label) label.textContent = state === "partial" ? "专家模式 · 部分" : "专家模式";
+}
+
+function toggleExpertMode() {
+    // 已经全开就全关；没开、或只开了一部分，都补成全开。
+    const turnOn = expertState() !== "on";
+    EXPERT_ITEMS.forEach((item) => {
+        const box = $(item.id);
+        if (!box) return;
+        box.checked = turnOn;
+        item.apply();
+    });
+    syncExpertButton();
+    showExpertNote(turnOn);
+}
+
+let expertNoteTimer = 0;
+
+function showExpertNote(turnOn) {
+    const host = $("expertToggle")?.parentElement;
+    if (!host) return;
+    let note = $("expertNote");
+    if (!turnOn) {
+        note?.remove();
+        return;
+    }
+    if (!note) {
+        note = document.createElement("div");
+        note.id = "expertNote";
+        note.className = "expert-note";
+        host.appendChild(note);
+    }
+    note.textContent = "已开启：" + expertNames();
+    clearTimeout(expertNoteTimer);
+    expertNoteTimer = setTimeout(() => note?.remove(), 2600);
 }
 
 async function openLearningHub() {

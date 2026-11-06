@@ -479,8 +479,9 @@ function bindDrawers() {
 async function boot() {
   try {
     const status = await fetch('/auth/status').then((r) => r.json());
+    // 带上回来的地址，登录成功后直接跳回学习台，不用他再去首页找入口
     if (!status.authenticated) {
-      location.href = '/';
+      location.href = '/?next=' + encodeURIComponent('/learn.html');
       return;
     }
   } catch (e) {
