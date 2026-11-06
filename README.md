@@ -182,7 +182,7 @@ Agent 工具提供搜索、资料检索、学习档案写入、工作区读取�
 ├── curriculum/agent-dev/       # 课程内容：course.json 目录 + chapters/*.md 正文
 ├── scripts/
 │   └── build_curriculum.py     # 一次性生成器：主线写死，模型只填正文
-├── docs/                       # 架构说明、改造计划与汇报页（网页版 PPT）
+├── docs/                       # 架构说明与改造计划（md）；组会汇报的 html/pdf 只在本地，不进仓库
 ├── .env.example                # 配置模板，不含真实密钥
 └── start.bat                   # Windows 本地启动脚本
 ```
