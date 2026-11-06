@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f8f9fb">
+  <meta name="description" content="Agent 开发课程学习台：目录、正文、导师三栏并排">
+  <title>知微 · Agent 开发学习台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="learn.css">
+</head>
+<body>
+  <div id="boot" class="boot">正在打开课程…</div>
+
+  <div class="shell" id="shell" hidden>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="回到工作台">
+        <span class="brand-mark"><i></i><i></i><i></i></span>
+        <span><strong>知微</strong><small>LEARNING DESK</small></span>
+      </a>
+
+      <div class="overall">
+        <div class="overall-text"><span id="courseName">Agent 开发</span><b id="progressText">0 / 0</b></div>
+        <div class="overall-bar"><span id="progressBar"></span></div>
+      </div>
+
+      <nav class="topbar-actions">
+        <a class="top-link" href="/" title="回到对话与研究区">← 研究区</a>
+        <button class="icon-btn" id="tocToggle" title="展开目录">☰</button>
+        <button class="icon-btn" id="tutorToggle" title="展开导师">✳</button>
+      </nav>
+    </header>
+
+    <div class="main">
+      <aside class="toc" id="toc">
+        <div class="toc-head">
+          <span>课程目录</span>
+          <button class="toc-close" id="tocClose" aria-label="收起目录">×</button>
+        </div>
+        <div class="toc-body" id="tocBody"></div>
+        <div class="toc-foot" id="tocFoot"></div>
+      </aside>
+
+      <main class="reader" id="reader">
+        <div class="reader-inner" id="readerInner">
+          <div class="empty-state">
+            <p>正在加载章节…</p>
+          </div>
+        </div>
+      </main>
+
+      <aside class="tutor" id="tutor">
+        <div class="tutor-head">
+          <div>
+            <strong>导师</strong>
+            <small id="tutorWhere">未选择章节</small>
+          </div>
+          <button class="toc-close" id="tutorClose" aria-label="收起导师">×</button>
+        </div>
+        <div class="tutor-log" id="tutorLog">
+          <div class="tutor-hint">
+            <p>这里问的是<b>当前这一章</b>。练习卡住时直接贴报错，它会先问你做到哪一步，而不是把答案丢给你。</p>
+          </div>
+        </div>
+        <div class="tutor-quick" id="tutorQuick"></div>
+        <form class="tutor-form" id="tutorForm">
+          <textarea id="tutorInput" rows="1" placeholder="问这一章的任何问题…"></textarea>
+          <button type="submit" id="tutorSend">发送</button>
+        </form>
+      </aside>
+    </div>
+  </div>
+
+  <div class="mask" id="mask" hidden></div>
+
+  <!-- marked 放本地：jsdelivr 在国内经常连不上，加载失败会退化成纯文本，
+       整页看起来像样式全丢了。这个文件 35 KB，跟着仓库走更稳。 -->
+  <script src="marked.min.js"></script>
+  <script src="learn.js"></script>
+</body>
+</html>

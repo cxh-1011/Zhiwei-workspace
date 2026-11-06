@@ -32,6 +32,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 from agent import run_agent, run_agent_stream, request_cancel, resolve_approval
 from llm import ModelConfigError, chat_completion, test_connection
+import course as course_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -50,6 +51,7 @@ from database import (
     save_learning_plan, list_learning_plans, set_learning_plan_status,
     delete_learning_plan, get_learning_plan, add_learning_tasks, list_learning_tasks,
     set_learning_task_status, delete_learning_task, replace_unfinished_learning_tasks,
+    list_course_progress, set_course_progress, add_course_question, list_course_questions,
 )
 
 
@@ -115,7 +117,10 @@ async def strip_api_prefix(request, call_next):
 # the /uploads mount is protected; only the login shell and its assets are public.
 SESSION_COOKIE = "ai_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
-PUBLIC_PATHS = {"/", "/index.html", "/style.css", "/app.js", "/auth/status", "/auth/login"}
+PUBLIC_PATHS = {"/", "/index.html", "/style.css", "/app.js", "/auth/status", "/auth/login",
+                # 学习台是另一张页面，它的静态资源必须放行，否则未登录时连登录框都看不到；
+                # 真正的数据接口（/course）仍然要登录，页面自己在 boot 里查 /auth/status。
+                "/learn.html", "/learn.css", "/learn.js", "/marked.min.js"}
 
 
 def password_matches(candidate: str) -> bool:
@@ -207,6 +212,10 @@ class Message(BaseModel):
     allow_command: StrictBool = False
     # 是否请求模型的思考过程（仅部分服务商支持，例如 Qwen3 系列）。默认关闭。
     show_thinking: StrictBool = False
+    # 学习模式用：他在哪门课、哪一章。只影响系统提示词里「你现在在哪」这一段，
+    # 不决定回答内容——正文由前端直接渲染，模型不重复讲。
+    course_id: str = Field("", max_length=32)
+    chapter_id: str = Field("", max_length=32)
 
 
 class PaperQuestion(BaseModel):
@@ -275,8 +284,21 @@ def logout(response: Response):
 
 def _chat_context(message: Message) -> dict:
     """校验请求并准备上下文。/chat 与 /chat/stream 共用，保证两条路径行为一致。"""
-    if message.mode not in {"chat", "file", "paper"}:
+    if message.mode not in {"chat", "file", "paper", "tutor"}:
         raise HTTPException(status_code=400, detail="未知的对话模式。")
+    selected_filename = None
+    image_path = None
+    # 学习模式必须带着章节进来：没有章节的「导师」会退化成普通问答，
+    # 与其让它瞎答，不如在这里直接挡掉，前端能立刻提示。
+    if message.mode == "tutor":
+        if not message.chapter_id:
+            raise HTTPException(status_code=400, detail="学习模式需要先选择一章。")
+        try:
+            course_lib.load_chapter(
+                message.course_id or course_lib.DEFAULT_COURSE, message.chapter_id
+            )
+        except course_lib.CourseError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
     selected_filename = None
     image_path = None
     if message.mode == "file":
@@ -366,6 +388,8 @@ def chat_stream(message: Message):
                 allow_code_edit=message.allow_code_edit,
                 allow_command=message.allow_command,
                 show_thinking=message.show_thinking,
+                course_id=message.course_id,
+                chapter_id=message.chapter_id,
             ):
                 if event.get("type") == "done":
                     result = event
@@ -1067,6 +1091,60 @@ def remove_learning_plan(plan_id: int):
 #   /app.js      -> 前端脚本
 #   /debug.html  -> 接口自检页
 # 一个服务（8000 端口）就把网页和后端接口全包了，不需要另起前端服务。
+
+# ======================
+# 课程学习台
+# ======================
+# 课程正文是文件，进度是数据库。这几个接口只做搬运，不生成内容——
+# 内容由 scripts/build_curriculum.py 离线生成、人工校对，运行时不再让模型现编，
+# 否则同一门课每次打开目录都不一样。
+
+class CourseProgressRequest(BaseModel):
+    chapter_id: str = Field(..., min_length=2, max_length=32)
+    status: str | None = None
+    mastery: int | None = None
+    notes: str | None = Field(None, max_length=4000)
+
+
+@app.get("/course")
+def get_course(course_id: str = course_lib.DEFAULT_COURSE):
+    try:
+        return course_lib.decorate(course_lib.load_course(course_id), course_id)
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/course/chapter/{chapter_id}")
+def get_course_chapter(chapter_id: str, course_id: str = course_lib.DEFAULT_COURSE):
+    try:
+        payload = course_lib.load_chapter(course_id, chapter_id)
+        chapters = course_lib.load_course(course_id)["chapters"]
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # 他可能直接点开了第 20 章，这里把「还差哪些前置」一起给他，前端画黄条
+    payload["blocked_by"] = course_lib.blocked_by(chapters, payload["chapter"])
+    return payload
+
+
+@app.patch("/course/progress")
+def update_course_progress(
+    data: CourseProgressRequest, course_id: str = course_lib.DEFAULT_COURSE
+):
+    if data.status is not None and data.status not in {"todo", "learning", "done"}:
+        raise HTTPException(status_code=400, detail="status 只能是 todo / learning / done")
+    if data.mastery is not None and not 0 <= data.mastery <= 3:
+        raise HTTPException(status_code=400, detail="mastery 只能是 0 到 3")
+    try:
+        course_lib.load_course(course_id)  # 先确认课程存在，别往库里写脏 id
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    progress = set_course_progress(
+        course_id, data.chapter_id,
+        status=data.status, mastery=data.mastery, notes=data.notes,
+    )
+    decorated = course_lib.decorate(course_lib.load_course(course_id), course_id)
+    return {"progress": progress, "summary": decorated["progress"], "next": decorated["next"]}
+
 
 if os.path.isdir(FRONTEND_DIR):
 

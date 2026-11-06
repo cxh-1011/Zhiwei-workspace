@@ -1,0 +1,739 @@
+{
+  "id": "agent-dev",
+  "title": "Agent 开发：从调通第一个接口到让它自己干活",
+  "subtitle": "一条按依赖顺序排好的主线，每章都有能跑的代码和能验收的练习",
+  "level": "需要有 Python 基础，不要求做过大模型",
+  "audience": "想自己做 agent、但不满足于调包的研究生与工程师",
+  "stages": [
+    {
+      "id": "s1",
+      "title": "地基",
+      "desc": "模型到底在做什么，一次请求里都有什么",
+      "chapters": [
+        "s1c1",
+        "s1c2",
+        "s1c3"
+      ]
+    },
+    {
+      "id": "s2",
+      "title": "提示词",
+      "desc": "把话说到位：结构化、少样本、强制输出格式",
+      "chapters": [
+        "s2c1",
+        "s2c2",
+        "s2c3"
+      ]
+    },
+    {
+      "id": "s3",
+      "title": "工具调用",
+      "desc": "让它伸手：function calling 的原理与 schema 设计",
+      "chapters": [
+        "s3c1",
+        "s3c2",
+        "s3c3",
+        "s3c4"
+      ]
+    },
+    {
+      "id": "s4",
+      "title": "Agent 循环",
+      "desc": "让它自己转：ReAct、多轮、终止条件与预算",
+      "chapters": [
+        "s4c1",
+        "s4c2",
+        "s4c3",
+        "s4c4"
+      ]
+    },
+    {
+      "id": "s5",
+      "title": "记忆",
+      "desc": "让它记得住：上下文裁剪、长期记忆、写入门控",
+      "chapters": [
+        "s5c1",
+        "s5c2",
+        "s5c3"
+      ]
+    },
+    {
+      "id": "s6",
+      "title": "检索增强",
+      "desc": "让它查得到：切片、向量、召回、重排",
+      "chapters": [
+        "s6c1",
+        "s6c2",
+        "s6c3",
+        "s6c4"
+      ]
+    },
+    {
+      "id": "s7",
+      "title": "工程化",
+      "desc": "让它不出事：流式、中断、审批、可观测",
+      "chapters": [
+        "s7c1",
+        "s7c2",
+        "s7c3",
+        "s7c4"
+      ]
+    },
+    {
+      "id": "s8",
+      "title": "评测",
+      "desc": "让它可证明：造数据集、判分、回归",
+      "chapters": [
+        "s8c1",
+        "s8c2",
+        "s8c3"
+      ]
+    },
+    {
+      "id": "s9",
+      "title": "进阶",
+      "desc": "多智能体与当前边界",
+      "chapters": [
+        "s9c1",
+        "s9c2",
+        "s9c3"
+      ]
+    },
+    {
+      "id": "s10",
+      "title": "收尾",
+      "desc": "做成产品：部署、成本、迭代",
+      "chapters": [
+        "s10c1",
+        "s10c2"
+      ]
+    }
+  ],
+  "chapters": [
+    {
+      "id": "s1c1",
+      "no": 1,
+      "stage": "s1",
+      "stage_title": "地基",
+      "title": "模型其实只会猜下一个字",
+      "summary": "搞懂模型不是在思考，而是在按概率猜下一个 token",
+      "objectives": [
+        "用 tokenizer 把一句话拆成 token 列表",
+        "手动写出模型对某句话的下一个 token 可能有哪些",
+        "画出模型生成 5 个字的完整 token 预测链条"
+      ],
+      "minutes": 40,
+      "practice": "输入 '今天天气'，手写出模型接下来最可能输出的 3 个 token，并说明每个 token 对应的原始文字",
+      "prereq": [],
+      "path": "chapters/s1c1.md"
+    },
+    {
+      "id": "s1c2",
+      "no": 2,
+      "stage": "s1",
+      "stage_title": "地基",
+      "title": "你发给模型的每条指令都算数",
+      "summary": "看清 system/user 消息、temperature、max_tokens 怎么真起作用",
+      "objectives": [
+        "改写同一段 user 内容，让输出变短/变长/更随机",
+        "把一段对话加 system 提示后对比输出差异",
+        "用代码调一次 API 并成功改这三个参数"
+      ],
+      "minutes": 40,
+      "practice": "用 Python 调通一次 API，分别测试 temperature=0 和 0.8 的输出差异，并截图保存",
+      "prereq": [
+        "s1c1"
+      ],
+      "path": "chapters/s1c2.md"
+    },
+    {
+      "id": "s1c3",
+      "no": 3,
+      "stage": "s1",
+      "stage_title": "地基",
+      "title": "上下文不是内存，是排队窗口",
+      "summary": "明白为什么聊久了它就忘了前面说过啥",
+      "objectives": [
+        "用 tokenizer 算出一段 200 字对话占多少 token",
+        "把一段超长对话切两半，分别发请求看结果差异",
+        "说出当前模型的上下文上限（如 32k）并查到官网依据"
+      ],
+      "minutes": 40,
+      "practice": "选一段 1500 字的聊天记录，用工具算出 token 数，并判断是否超出你用的模型上限",
+      "prereq": [
+        "s1c2"
+      ],
+      "path": "chapters/s1c3.md"
+    },
+    {
+      "id": "s2c1",
+      "no": 4,
+      "stage": "s2",
+      "stage_title": "提示词",
+      "title": "四段式写提示词",
+      "summary": "学会把提示词拆成角色、任务、约束、输出格式四块来写",
+      "objectives": [
+        "能用四段式模板重写任意模糊需求",
+        "能指出别人提示词缺哪一段",
+        "能检查自己写的四段是否自相矛盾"
+      ],
+      "minutes": 40,
+      "practice": "用四段式改写一个口语化需求，输出完整提示词文本",
+      "prereq": [
+        "s1c3"
+      ],
+      "path": "chapters/s2c1.md"
+    },
+    {
+      "id": "s2c2",
+      "no": 5,
+      "stage": "s2",
+      "stage_title": "提示词",
+      "title": "少样本示例怎么用才不翻车",
+      "summary": "搞懂什么时候该放例子、放几个、例子怎么写才不带偏模型",
+      "objectives": [
+        "能判断给定场景该加还是该删示例",
+        "能从三个错误示例中挑出最坑人的那个",
+        "能写出一个不带暗示性干扰的干净示例"
+      ],
+      "minutes": 40,
+      "practice": "针对天气查询需求，写出两个有效示例和一个会带偏模型的坏示例",
+      "prereq": [
+        "s2c1"
+      ],
+      "path": "chapters/s2c2.md"
+    },
+    {
+      "id": "s2c3",
+      "no": 6,
+      "stage": "s2",
+      "stage_title": "提示词",
+      "title": "让模型老老实实输出JSON",
+      "summary": "用schema强制输出JSON，并处理解析失败的情况",
+      "objectives": [
+        "能手写符合要求的JSON Schema",
+        "能用正则+重试兜住一次JSON解析失败",
+        "能手动提取并验证返回JSON里的指定字段"
+      ],
+      "minutes": 40,
+      "practice": "写一个提示词，让模型返回包含name/price/unit的JSON，且对非法输出有重试机制",
+      "prereq": [
+        "s2c2"
+      ],
+      "path": "chapters/s2c3.md"
+    },
+    {
+      "id": "s3c1",
+      "no": 7,
+      "stage": "s3",
+      "stage_title": "工具调用",
+      "title": "模型其实不会调工具",
+      "summary": "搞懂模型只是输出调用指令，不是真执行代码",
+      "objectives": [
+        "能画出一次function calling请求的完整流程图",
+        "能手动模拟模型输出的JSON格式调用请求",
+        "能指出哪部分是模型生成、哪部分是程序执行"
+      ],
+      "minutes": 40,
+      "practice": "手写一段对话，让模型输出调用天气API的JSON，不写任何执行逻辑，只模拟模型输出",
+      "prereq": [
+        "s2c3"
+      ],
+      "path": "chapters/s3c1.md"
+    },
+    {
+      "id": "s3c2",
+      "no": 8,
+      "stage": "s3",
+      "stage_title": "工具调用",
+      "title": "工具描述怎么写才管用",
+      "summary": "写出能让模型看懂、选对、填准参数的工具说明",
+      "objectives": [
+        "能为一个计算器工具写出符合要求的schema JSON",
+        "能检查出别人写的schema里‘描述模糊’或‘参数缺类型’的问题",
+        "能改写自然语言描述，让它变成模型能用的工具定义"
+      ],
+      "minutes": 40,
+      "practice": "给定一个查快递接口，写出它的完整schema，包括名称、描述、参数名、类型和必填说明",
+      "prereq": [
+        "s3c1"
+      ],
+      "path": "chapters/s3c2.md"
+    },
+    {
+      "id": "s3c3",
+      "no": 9,
+      "stage": "s3",
+      "stage_title": "工具调用",
+      "title": "工具报错后让它自己改",
+      "summary": "把错误信息塞回对话，让模型重试并修正调用",
+      "objectives": [
+        "能在代码里捕获工具调用异常并拼进下一轮prompt",
+        "能设计提示词，让模型看到报错后主动改参数或换工具",
+        "能验证模型在报错后第二次输出的调用JSON是合法的"
+      ],
+      "minutes": 40,
+      "practice": "用一个故意写错参数的天气工具调用触发报错，然后让模型根据错误信息重新输出正确调用",
+      "prereq": [
+        "s3c2"
+      ],
+      "path": "chapters/s3c3.md"
+    },
+    {
+      "id": "s3c4",
+      "no": 10,
+      "stage": "s3",
+      "stage_title": "工具调用",
+      "title": "二十个工具怎么不选错",
+      "summary": "教模型从一堆工具里快速挑出真正该用的那个",
+      "objectives": [
+        "能给每个工具加一句精准的‘一句话用途’描述",
+        "能设计一个测试用例，让模型在15个工具里准确选出2个该用的",
+        "能发现并删掉工具列表里重复或干扰性过强的描述"
+      ],
+      "minutes": 40,
+      "practice": "准备20个工具（含5个相似功能），让模型在单次请求中准确选出唯一该用的那1个并调用",
+      "prereq": [
+        "s3c3"
+      ],
+      "path": "chapters/s3c4.md"
+    },
+    {
+      "id": "s4c1",
+      "no": 11,
+      "stage": "s4",
+      "stage_title": "Agent 循环",
+      "title": "ReAct 循环：想-做-看三步走",
+      "summary": "教会模型像人一样边想边做，每轮只干一件事再看结果",
+      "objectives": [
+        "手写一个 ReAct 格式的 prompt，让模型按‘思考→行动→观察’顺序输出",
+        "用代码把模型输出解析成结构化步骤（思考/动作/参数）",
+        "跑通一次 ReAct 循环，看到模型自己生成下一步动作"
+      ],
+      "minutes": 40,
+      "practice": "写一个天气查询 Agent，输入‘上海明天热不热’，它能自己拆出‘查上海天气→提取温度→判断是否热’三步并执行",
+      "prereq": [
+        "s3c4"
+      ],
+      "path": "chapters/s4c1.md"
+    },
+    {
+      "id": "s4c2",
+      "no": 12,
+      "stage": "s4",
+      "stage_title": "Agent 循环",
+      "title": "什么时候该停下：别转圈",
+      "summary": "教 Agent 别死磕，知道啥时候该交答案、啥时候该认输",
+      "objectives": [
+        "在 prompt 里加一条明确的终止条件（如‘已拿到答案’或‘查不到就放弃’）",
+        "代码里检测到终止信号时主动跳出循环，不再发新请求",
+        "让 Agent 对‘不知道’的问题直接回答‘查不到’，不瞎猜"
+      ],
+      "minutes": 40,
+      "practice": "改写上一章的天气 Agent，让它对‘火星明天热不热’这种问题，第二轮就停止并说‘没查到火星天气’",
+      "prereq": [
+        "s4c1"
+      ],
+      "path": "chapters/s4c2.md"
+    },
+    {
+      "id": "s4c3",
+      "no": 13,
+      "stage": "s4",
+      "stage_title": "Agent 循环",
+      "title": "给 Agent 上三道锁：token、时间、次数",
+      "summary": "防止它狂刷 API 或卡住，用硬指标掐住它的运行",
+      "objectives": [
+        "在代码里统计每次请求的 token 数，超限就停",
+        "加个 5 秒超时，响应慢就中断当前轮次",
+        "设置最多 3 轮循环，到数自动交卷"
+      ],
+      "minutes": 40,
+      "practice": "给天气 Agent 加三重限制：总 token 不超 2000、单次响应不超 5 秒、最多跑 3 轮，超任一就结束",
+      "prereq": [
+        "s4c2"
+      ],
+      "path": "chapters/s4c3.md"
+    },
+    {
+      "id": "s4c4",
+      "no": 14,
+      "stage": "s4",
+      "stage_title": "Agent 循环",
+      "title": "一次运行全过程图解",
+      "summary": "看清从你敲下回车，到屏幕打出答案，中间每一步谁干了啥",
+      "objectives": [
+        "画出自己写的 Agent 运行状态图（含输入、思考、调工具、收结果、判终止）",
+        "在代码关键节点加 print，看到每步实际输出内容",
+        "手动模拟一次失败流程（如工具返回空），验证它是否按状态图走完"
+      ],
+      "minutes": 40,
+      "practice": "用真实日志还原一次完整运行：从提问开始，标出哪行是思考、哪行调了工具、哪行是观察结果、哪行决定停止",
+      "prereq": [
+        "s4c3"
+      ],
+      "path": "chapters/s4c4.md"
+    },
+    {
+      "id": "s5c1",
+      "no": 15,
+      "stage": "s5",
+      "stage_title": "记忆",
+      "title": "对话太长了，怎么砍才不丢重点",
+      "summary": "教你怎么从一堆聊天记录里挑出真正有用的几句话保留",
+      "objectives": [
+        "能用规则法删掉重复问候和无效闲聊",
+        "能按角色和时间保留关键决策句",
+        "能用代码把 100 行对话压到 20 行以内"
+      ],
+      "minutes": 40,
+      "practice": "写一个函数，输入原始对话列表，输出裁剪后的精简对话列表",
+      "prereq": [
+        "s4c4"
+      ],
+      "path": "chapters/s5c1.md"
+    },
+    {
+      "id": "s5c2",
+      "no": 16,
+      "stage": "s5",
+      "stage_title": "记忆",
+      "title": "哪些事该记进长期记忆里",
+      "summary": "明确告诉模型什么该存、什么时候该拿出来用",
+      "objectives": [
+        "能列出用户反复问的三类问题并存成记忆条目",
+        "能在新对话中主动调出匹配的记忆条目",
+        "能用 JSON 格式存一条带时间戳和用途标记的记忆"
+      ],
+      "minutes": 40,
+      "practice": "实现一个记忆写入+读取小工具：输入‘用户常忘密码’，存进去；下次聊‘登录’时自动取出",
+      "prereq": [
+        "s5c1"
+      ],
+      "path": "chapters/s5c2.md"
+    },
+    {
+      "id": "s5c3",
+      "no": 17,
+      "stage": "s5",
+      "stage_title": "记忆",
+      "title": "为什么不能让模型自己决定记啥",
+      "summary": "堵住模型乱记一气的漏洞，强制人工把关",
+      "objectives": [
+        "能指出模型自动生成记忆时的三个典型错误例子",
+        "能写出禁止模型擅自写记忆的提示词指令",
+        "能在代码里加一层开关，所有写记忆必须人工确认"
+      ],
+      "minutes": 40,
+      "practice": "改写一段 agent 代码，在调用记忆写入前插入人工确认环节，并打印待存内容供审核",
+      "prereq": [
+        "s5c2"
+      ],
+      "path": "chapters/s5c3.md"
+    },
+    {
+      "id": "s6c1",
+      "no": 18,
+      "stage": "s6",
+      "stage_title": "检索增强",
+      "title": "切片别把句子砍成两半",
+      "summary": "教你怎么切文档，不破坏语义，让后面查得准",
+      "objectives": [
+        "用中文标点识别句子边界",
+        "写代码按句切文本，不按固定字数硬切",
+        "验证切出来的每段都是完整句子"
+      ],
+      "minutes": 40,
+      "practice": "输入一篇带标点的中文文章，输出按句切分的列表，每项是完整句子",
+      "prereq": [
+        "s5c3"
+      ],
+      "path": "chapters/s6c1.md"
+    },
+    {
+      "id": "s6c2",
+      "no": 19,
+      "stage": "s6",
+      "stage_title": "检索增强",
+      "title": "向量不是玄学，是数字比大小",
+      "summary": "搞懂 embedding 就是把句子变成一串数字，靠算距离找相似内容",
+      "objectives": [
+        "调用一个开源 embedding 模型把句子转成向量",
+        "算两个向量的余弦相似度",
+        "用相似度排序找出最像的 3 段文本"
+      ],
+      "minutes": 40,
+      "practice": "给定 5 段文本和 1 个问题句，输出按相似度从高到低排的文本序号",
+      "prereq": [
+        "s6c1"
+      ],
+      "path": "chapters/s6c2.md"
+    },
+    {
+      "id": "s6c3",
+      "no": 20,
+      "stage": "s6",
+      "stage_title": "检索增强",
+      "title": "召回太多？挑出前三名再细看",
+      "summary": "第一次搜出一堆结果，得再筛一遍，挑真正相关的",
+      "objectives": [
+        "写代码对召回结果做关键词过滤",
+        "用另一个小模型重打分并排序",
+        "只保留重排后 top3 的结果"
+      ],
+      "minutes": 40,
+      "practice": "输入 10 个召回段落和 1 个问题，输出重排后得分最高的 3 段原文",
+      "prereq": [
+        "s6c2"
+      ],
+      "path": "chapters/s6c3.md"
+    },
+    {
+      "id": "s6c4",
+      "no": 21,
+      "stage": "s6",
+      "stage_title": "检索增强",
+      "title": "RAG 为啥胡说八道还理直气壮",
+      "summary": "看清常见翻车现场：答非所问、瞎自信、漏关键信息",
+      "objectives": [
+        "人工检查 RAG 输出是否照抄了检索段落",
+        "标出答案里哪部分没在检索结果里出现",
+        "改写提示词让模型承认‘不知道’而不是乱编"
+      ],
+      "minutes": 40,
+      "practice": "给定检索结果、问题和 RAG 回答，输出三行：是否照抄、哪句是编的、怎么改提示词",
+      "prereq": [
+        "s6c3"
+      ],
+      "path": "chapters/s6c4.md"
+    },
+    {
+      "id": "s7c1",
+      "no": 22,
+      "stage": "s7",
+      "stage_title": "工程化",
+      "title": "让回答一出来就显示",
+      "summary": "解决用户等得着急的问题，把大段回复拆成小块实时发",
+      "objectives": [
+        "用 OpenAI SDK 开启流式输出",
+        "把收到的每一段 token 拼成完整句子",
+        "在网页上实现逐字打印效果"
+      ],
+      "minutes": 40,
+      "practice": "写一个命令行脚本，调用模型并实时打印每个 token，最终输出完整回答",
+      "prereq": [
+        "s6c4"
+      ],
+      "path": "chapters/s7c1.md"
+    },
+    {
+      "id": "s7c2",
+      "no": 23,
+      "stage": "s7",
+      "stage_title": "工程化",
+      "title": "点‘停止’后它真停了吗",
+      "summary": "搞清中断信号怎么传、模型怎么响应、资源怎么释放",
+      "objectives": [
+        "在请求中加入 timeout 和 cancel 信号",
+        "捕获中断异常并清理临时资源",
+        "让程序在用户取消后不卡死、不继续计费"
+      ],
+      "minutes": 40,
+      "practice": "写一个带‘停止’按钮的简易 Web 页面，点击后立即终止后端请求并提示‘已取消’",
+      "prereq": [
+        "s7c1"
+      ],
+      "path": "chapters/s7c2.md"
+    },
+    {
+      "id": "s7c3",
+      "no": 24,
+      "stage": "s7",
+      "stage_title": "工程化",
+      "title": "哪些操作必须先问人再干",
+      "summary": "识别高风险动作（比如删库、转账），拦住并等人工点头",
+      "objectives": [
+        "给工具调用加 is_dangerous 标记",
+        "拦截危险调用并返回待审批列表",
+        "在审批通过后自动续跑被拦住的任务"
+      ],
+      "minutes": 40,
+      "practice": "模拟一个‘删除用户数据’工具，触发时暂停流程，生成审批链接，点击后继续执行",
+      "prereq": [
+        "s7c2"
+      ],
+      "path": "chapters/s7c3.md"
+    },
+    {
+      "id": "s7c4",
+      "no": 25,
+      "stage": "s7",
+      "stage_title": "工程化",
+      "title": "出问题了怎么查哪一步挂了",
+      "summary": "记录每一步干了啥、花了多久、返回啥，方便回放排查",
+      "objectives": [
+        "为每次 Agent 调用生成唯一 trace_id",
+        "记录工具名、输入、耗时、结果状态",
+        "用日志还原一次失败任务的完整执行路径"
+      ],
+      "minutes": 40,
+      "practice": "运行一个失败的 Agent 任务，从日志里找出哪一步超时、哪一步返回了空结果",
+      "prereq": [
+        "s7c3"
+      ],
+      "path": "chapters/s7c4.md"
+    },
+    {
+      "id": "s8c1",
+      "no": 26,
+      "stage": "s8",
+      "stage_title": "评测",
+      "title": "从失败记录里攒测试题",
+      "summary": "教你怎么从线上报错、用户吐槽里直接扒出真实测试题",
+      "objectives": [
+        "能翻出最近一周的3条失败日志",
+        "能从中提取出1个可复现的输入-期望输出对",
+        "能把这道题加进本地测试集文件里"
+      ],
+      "minutes": 40,
+      "practice": "用你上周写的Agent接口的真实失败记录，整理出2道带输入、期望输出、失败原因的测试题，并存成test_cases.json",
+      "prereq": [
+        "s7c4"
+      ],
+      "path": "chapters/s8c1.md"
+    },
+    {
+      "id": "s8c2",
+      "no": 27,
+      "stage": "s8",
+      "stage_title": "评测",
+      "title": "规则判分和模型判分怎么选",
+      "summary": "什么时候写正则就能搞定，什么时候必须让大模型来打分",
+      "objectives": [
+        "能写出判断日期格式是否正确的正则表达式",
+        "能调通一个用大模型打分的评分函数",
+        "能根据题目类型（如‘算数结果’vs‘摘要质量’）选对判分方式"
+      ],
+      "minutes": 40,
+      "practice": "为上一章攒的2道题分别写两种判分逻辑：一道用规则（比如检查是否含‘元’字），一道用模型打分（比如评摘要是否覆盖要点），并跑通",
+      "prereq": [
+        "s8c1"
+      ],
+      "path": "chapters/s8c2.md"
+    },
+    {
+      "id": "s8c3",
+      "no": 28,
+      "stage": "s8",
+      "stage_title": "评测",
+      "title": "改提示词后不踩雷",
+      "summary": "改完提示词怕别的功能崩了？教你用老题快速验一遍",
+      "objectives": [
+        "能从老测试集里挑出5道不相关题组成回归集",
+        "能用新旧提示词各跑一遍回归集并对比结果",
+        "能标出哪道题退步了、哪道题意外变好了"
+      ],
+      "minutes": 40,
+      "practice": "拿你当前Agent的提示词和上一版对比，用10道历史题跑回归，输出一份‘没坏的题’和‘坏了的题’清单",
+      "prereq": [
+        "s8c2"
+      ],
+      "path": "chapters/s8c3.md"
+    },
+    {
+      "id": "s9c1",
+      "no": 29,
+      "stage": "s9",
+      "stage_title": "进阶",
+      "title": "多智能体真有用吗",
+      "summary": "帮你判断一个任务到底该用单个Agent还是多个Agent",
+      "objectives": [
+        "能列出三个必须用多Agent的实际场景",
+        "能指出一个看似需要多Agent但其实单Agent就能搞定的例子",
+        "能根据需求画出单Agent和多Agent的流程对比草图"
+      ],
+      "minutes": 40,
+      "practice": "写一份两百字内的技术选型建议，说明某个具体业务是否该上多Agent",
+      "prereq": [
+        "s8c3"
+      ],
+      "path": "chapters/s9c1.md"
+    },
+    {
+      "id": "s9c2",
+      "no": 30,
+      "stage": "s9",
+      "stage_title": "进阶",
+      "title": "多Agent为啥容易翻车",
+      "summary": "看清多Agent协作时的真实坑：慢、乱、贵",
+      "objectives": [
+        "能估算两个Agent来回调用一次增加的延迟和token开销",
+        "能举出一个因Agent间指令冲突导致错误结果的例子",
+        "能修改一段多Agent代码，加日志标记每次通信的发起方和内容"
+      ],
+      "minutes": 40,
+      "practice": "给一个已有的双Agent对话脚本加上耗时统计和冲突检测提示",
+      "prereq": [
+        "s9c1"
+      ],
+      "path": "chapters/s9c2.md"
+    },
+    {
+      "id": "s9c3",
+      "no": 31,
+      "stage": "s9",
+      "stage_title": "进阶",
+      "title": "现在别硬刚的事",
+      "summary": "知道哪些问题当前技术根本解决不了，省得白调提示词",
+      "objectives": [
+        "能说出三个今天大模型+Agent仍无法稳定做到的具体任务",
+        "能对一个客户提出的‘全自动写周报’需求，指出其中不可行的环节",
+        "能写出一句明确拒绝某类需求的话，不甩锅给‘模型不行’"
+      ],
+      "minutes": 40,
+      "practice": "整理一份‘2024年Agent能力红绿灯清单’，红灯项附一句话原因",
+      "prereq": [
+        "s9c2"
+      ],
+      "path": "chapters/s9c3.md"
+    },
+    {
+      "id": "s10c1",
+      "no": 32,
+      "stage": "s10",
+      "stage_title": "收尾",
+      "title": "算清楚每句话花多少钱",
+      "summary": "教你怎么算出一次对话模型花了多少 token、花了多少钱",
+      "objectives": [
+        "用代码打印出每次请求的输入输出 token 数",
+        "根据 API 价格表算出单次对话成本",
+        "对比不同模型在相同任务下的花费差异"
+      ],
+      "minutes": 40,
+      "practice": "写一个函数，输入一段对话，输出该对话在 GPT-4 和 Claude-3 上分别花了多少钱",
+      "prereq": [
+        "s9c3"
+      ],
+      "path": "chapters/s10c1.md"
+    },
+    {
+      "id": "s10c2",
+      "no": 33,
+      "stage": "s10",
+      "stage_title": "收尾",
+      "title": "靠用户反馈改出下一版",
+      "summary": "怎么从用户吐槽里找出真问题，改出真正有用的下一版",
+      "objectives": [
+        "把用户原始反馈归类成「功能缺失」「回答错误」「太慢」三类",
+        "用表格记录前 10 条反馈并标出优先级",
+        "写出下个版本要改的 3 条具体需求（如：加一个重试按钮）"
+      ],
+      "minutes": 40,
+      "practice": "给定 15 条真实用户反馈文本，整理成带优先级的迭代清单，并圈出下周必须上线的 1 项",
+      "prereq": [
+        "s10c1"
+      ],
+      "path": "chapters/s10c2.md"
+    }
+  ]
+}

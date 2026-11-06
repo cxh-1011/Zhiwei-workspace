@@ -98,6 +98,35 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_learning_tasks_plan ON learning_tasks(plan_id, sort_order, id)")
 
+    # 课程进度。课程正文放文件（能 git、能手改），只有「学到哪了」这种
+    # 随时会变的状态放这里。mastery 用 0-3 而不是布尔：同样标了「学完」，
+    # 有人是看懂了，有人是能自己写出来，这两种不该推荐同一章。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS course_progress(
+        course_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        status TEXT DEFAULT 'todo',
+        mastery INTEGER DEFAULT 0,
+        notes TEXT DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (course_id, chapter_id)
+    )
+    """)
+
+    # 章节里问过什么。用来让导师知道「他在这章卡过什么」，
+    # 也让「推荐下一步」有依据，而不是每次都从第一章重新开始猜。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS course_questions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        answer TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_course_questions_ch ON course_questions(course_id, chapter_id)")
+
 
 
     cursor.execute("""
@@ -606,3 +635,88 @@ def replace_unfinished_learning_tasks(plan_id, tasks):
     conn.commit()
     conn.close()
     return created
+
+
+# ---------- 课程进度 ----------
+
+def list_course_progress(course_id):
+    """返回 {chapter_id: {...}}。没有记录的章节不在结果里，由上层补 todo。"""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT chapter_id,status,mastery,notes,updated_at FROM course_progress WHERE course_id=?",
+        (course_id,),
+    ).fetchall()
+    conn.close()
+    return {
+        row[0]: {"status": row[1] or "todo", "mastery": int(row[2] or 0),
+                 "notes": row[3] or "", "updated_at": row[4]}
+        for row in rows
+    }
+
+
+def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=None):
+    """只更新传进来的字段。status 与 mastery 分开，是因为「看过」和「学会」是两件事。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO course_progress(course_id,chapter_id) VALUES(?,?)",
+        (course_id, chapter_id),
+    )
+    sets, params = [], []
+    if status is not None:
+        sets.append("status=?")
+        params.append(status)
+    if mastery is not None:
+        sets.append("mastery=?")
+        params.append(int(mastery))
+    if notes is not None:
+        sets.append("notes=?")
+        params.append(notes)
+    if sets:
+        sets.append("updated_at=CURRENT_TIMESTAMP")
+        params.extend([course_id, chapter_id])
+        cursor.execute(
+            "UPDATE course_progress SET %s WHERE course_id=? AND chapter_id=?" % ", ".join(sets),
+            params,
+        )
+    conn.commit()
+    row = cursor.execute(
+        "SELECT status,mastery,notes,updated_at FROM course_progress WHERE course_id=? AND chapter_id=?",
+        (course_id, chapter_id),
+    ).fetchone()
+    conn.close()
+    return {"status": row[0], "mastery": int(row[1] or 0), "notes": row[2] or "", "updated_at": row[3]}
+
+
+def add_course_question(course_id, chapter_id, question, answer=""):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO course_questions(course_id,chapter_id,question,answer) VALUES(?,?,?,?)",
+        (course_id, chapter_id, (question or "")[:4000], (answer or "")[:20000]),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def list_course_questions(course_id, chapter_id=None, limit=30):
+    conn = sqlite3.connect(DB_PATH)
+    if chapter_id:
+        rows = conn.execute(
+            "SELECT id,chapter_id,question,answer,created_at FROM course_questions "
+            "WHERE course_id=? AND chapter_id=? ORDER BY id DESC LIMIT ?",
+            (course_id, chapter_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id,chapter_id,question,answer,created_at FROM course_questions "
+            "WHERE course_id=? ORDER BY id DESC LIMIT ?",
+            (course_id, limit),
+        ).fetchall()
+    conn.close()
+    return [
+        {"id": r[0], "chapter_id": r[1], "question": r[2], "answer": r[3], "created_at": r[4]}
+        for r in rows
+    ]
