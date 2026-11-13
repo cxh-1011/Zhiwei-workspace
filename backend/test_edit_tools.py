@@ -43,10 +43,11 @@ def check(label, cond, detail=""):
     print(("  PASS  " if cond else "  FAIL  ") + label + (("  -> " + str(detail)[:130]) if detail else ""))
 
 
-def invoke(name, args=None, run_id="runA"):
+def invoke(name, args=None, run_id="runA", allow_code_edit=True):
     tool = get_tool(name)
     assert tool is not None, "工具未注册：%s" % name
-    return tool.invoke(args or {}, {"run_id": run_id})
+    # 授权要显式传：工具层现在会自己核对，不传就当没授权
+    return tool.invoke(args or {}, {"run_id": run_id, "allow_code_edit": allow_code_edit})
 
 
 def read(rel):
@@ -292,6 +293,27 @@ check("文件回到 before", read("src/api.txt") == "before\n", repr(read("src/a
 
 resp_404 = client.post("/code/undo/no_such_run")
 check("未知运行返回 404", resp_404.status_code == 404, resp_404.status_code)
+
+print("\n== 10. 工具层自己核对授权（绕过 agent 直接调） ==")
+# agent 那两道闸都在 agent.py 里：不注册未授权工具、执行前核对允许列表。
+# 这一节验证第三道——工具自身也认标志。哪天真有别的调用路径绕过 agent，
+# 它同样写不进去，而不是靠「调用方记得传对参数」。
+r_no = invoke("write_file", {"path": "src/noperm.txt", "content": "x"}, allow_code_edit=False)
+check("未授权时 write_file 被拒", not r_no.ok, r_no.error[:70])
+check("未授权时没有落盘", not os.path.exists(os.path.join(TEMP_ROOT, "src/noperm.txt")))
+
+write_raw("src/noperm2.txt", "origin\n")
+r_no2 = invoke("edit_file", {"path": "src/noperm2.txt", "old_string": "origin",
+                             "new_string": "changed"}, allow_code_edit=False)
+check("未授权时 edit_file 被拒", not r_no2.ok, r_no2.error[:70])
+check("未授权时文件没被改", read("src/noperm2.txt") == "origin\n", repr(read("src/noperm2.txt")))
+
+# context 里干脆没有这个键（老调用方、漏传）也必须当成未授权
+r_missing = get_tool("write_file").invoke({"path": "src/nokey.txt", "content": "x"}, {"run_id": "runX"})
+check("缺省视为未授权", not r_missing.ok, r_missing.error[:70])
+
+r_yes = invoke("write_file", {"path": "src/yespera.txt", "content": "ok\n"})
+check("授权后仍然能写", r_yes.ok and read("src/yespera.txt") == "ok\n", r_yes.error[:70])
 
 failed = sum(1 for _, ok in results if not ok)
 print("\n结果：%d 通过 / %d 失败" % (len(results) - failed, failed))

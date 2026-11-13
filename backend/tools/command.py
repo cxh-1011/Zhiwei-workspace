@@ -438,6 +438,11 @@ def _header(command: str, cwd_rel: str) -> str:
 
 
 def run_command(arguments: dict, context: dict) -> ToolResult:
+    # 第三道闸：agent 层已经「不注册未授权工具」并在执行前核对允许列表，
+    # 这里让工具自己也认一次标志——别的调用方绕过 agent 直接调时同样执行不了。
+    if not context.get("allow_command"):
+        return ToolResult(False, "", error="没有开启「允许执行命令」，拒绝执行")
+
     command = str(arguments.get("command") or "").strip()
     cwd_rel = str(arguments.get("cwd") or ".").strip().replace("\\", "/")
 

@@ -61,7 +61,11 @@ def touch_bytes(rel, data):
 def invoke(name, args=None, run_id="runR"):
     tool = get_tool(name)
     assert tool is not None, "工具未注册：%s" % name
-    return tool.invoke(args or {}, {"run_id": run_id})
+    # 这里测的是「路径与文件类型的红线」，不是授权，所以把两个权限都给足。
+    # 授权缺失本身另有专门的用例（test_edit_tools / test_command_tools 末节），
+    # 混在一起会让「被红线拒绝」和「被授权拒绝」看起来一样，断言就失去意义了。
+    return tool.invoke(args or {}, {"run_id": run_id, "allow_code_edit": True,
+                                    "allow_command": True})
 
 
 # ---------------------------------------------------------------- 准备素材

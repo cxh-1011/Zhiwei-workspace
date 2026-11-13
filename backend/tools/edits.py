@@ -197,9 +197,30 @@ def _apply_write(run_id: str, rel: str, target: str, old_text: str, new_text: st
     return ToolResult(True, head + "\n" + body, data)
 
 
+# ---------------------------------------------------------------- 写入授权
+
+def _require_edit_permission(context: dict) -> ToolResult | None:
+    """写入前再核一次授权，没有就返回拒绝结果，有就返回 None。
+
+    授权本来已经有两道闸：`agent.py` 不注册未授权的工具（模型看不到 schema），
+    执行前再核对 `name not in tool_names`（编个名字也调不到）。这里补第三道。
+
+    第三道不是多余的。前两道都在 `agent.py` 里，工具自身完全不知情——也就是说
+    任何绕过 agent 的调用路径（脚本、新的调用方、将来把「按需注册」改成「总是注册
+    但在调用时判断」）都能直接写盘。安全不该压在别人记得传对参数上。
+    """
+    if context.get("allow_code_edit"):
+        return None
+    return ToolResult(False, "", error="没有开启「允许改代码」，拒绝写入")
+
+
 # ---------------------------------------------------------------- write_file
 
 def _write_file(args: dict, context: dict) -> ToolResult:
+    denied = _require_edit_permission(context)
+    if denied:
+        return denied
+
     rel = str(args.get("path", "")).strip()
     content = args.get("content")
     if not rel:
@@ -268,6 +289,10 @@ def _occurrence_lines(text: str, needle: str, limit: int = 5) -> list[int]:
 
 
 def _edit_file(args: dict, context: dict) -> ToolResult:
+    denied = _require_edit_permission(context)
+    if denied:
+        return denied
+
     rel = str(args.get("path", "")).strip()
     old_string = args.get("old_string")
     new_string = args.get("new_string")

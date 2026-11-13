@@ -76,8 +76,10 @@ TOOL = get_tool("run_command")
 assert TOOL is not None, "run_command 没有注册"
 
 
-def invoke(args, approved=None, stop=None):
-    context = {"run_id": "runCmd", "approved_commands": set(approved or [])}
+def invoke(args, approved=None, stop=None, allow_command=True):
+    # 授权显式传：工具层现在自己也核对，不传就当没授权
+    context = {"run_id": "runCmd", "approved_commands": set(approved or []),
+               "allow_command": allow_command}
     if stop is not None:
         context["should_stop"] = stop
     return TOOL.invoke(args, context)
@@ -218,12 +220,16 @@ check("密钥变量被整体移除", "KEY=MISSING" in r.content, r.content[:150]
 check("UTF-8 设置仍在", "UTF=1" in r.content, r.content[:150])
 
 print("\n[8] 审批门禁（工具层）")
-r = TOOL.invoke({"command": "python -c \"print(1)\""}, {"run_id": "r1", "approved_commands": set()})
+# 这里验证的是「ask 级命令没批准就不执行」，所以授权要显式给足；
+# 授权缺失的情况另见第 16 节，不要让两件事混在一条断言里。
+r = TOOL.invoke({"command": "python -c \"print(1)\""},
+                {"run_id": "r1", "approved_commands": set(), "allow_command": True})
 check("未批准时拒绝执行", not r.ok, r.ok)
 check("提示需要用户确认", "需要用户确认" in (r.error or ""), (r.error or "")[:100])
 
 cmd_text = "python -c \"print('approved-here')\""
-r = TOOL.invoke({"command": cmd_text}, {"run_id": "r1", "approved_commands": {cmd_text}})
+r = TOOL.invoke({"command": cmd_text},
+                {"run_id": "r1", "approved_commands": {cmd_text}, "allow_command": True})
 check("批准后执行", r.ok and "approved-here" in r.content, r.content[:120])
 
 r = invoke({"command": "rm -rf src"})
@@ -452,6 +458,19 @@ check("批准唤醒了等待方", agent._APPROVALS.get(entry_id, {}).get("event"
 cross = client.post("/chat/approve/other-run", json={"approval_id": entry_id, "allow": True})
 check("跨运行号点不动", cross.status_code == 404, cross.status_code)
 agent._APPROVALS.pop(entry_id, None)
+
+print("\n[16] 工具层自己核对授权（绕过 agent 直接调）")
+# 第 11 节的拒绝发生在 agent 层（工具压根没注册，所以提示「不在允许列表」）。
+# 这一节验证的是第三道：就算有人绕开 agent 直接调 handler，工具自己也该拒绝。
+r_no = invoke({"command": "python ok.py"}, allow_command=False)
+check("未授权时直接调用被拒", not r_no.ok, r_no.error[:80])
+check("拒绝原因说清了是没开启", "允许执行命令" in r_no.error, r_no.error[:80])
+
+raw = TOOL.invoke({"command": "python ok.py"}, {"run_id": "noKey"})
+check("context 里没有这个标志也拒绝", not raw.ok, raw.error[:80])
+
+r_yes = invoke({"command": "python ok.py"})
+check("授权后仍能执行", r_yes.ok, r_yes.error[:80])
 
 failed = sum(1 for _, ok in results if not ok)
 print("\n结果：%d 通过 / %d 失败" % (len(results) - failed, failed))
