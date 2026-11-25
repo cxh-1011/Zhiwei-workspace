@@ -826,6 +826,18 @@ def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=
             "updated_at": row[3], "quiz_score": row[4], "quiz_at": row[5]}
 
 
+def now_text():
+    """取 SQLite 自己的时间文本。
+
+    不用 Python 的 datetime.now()：表里其他地方都是 CURRENT_TIMESTAMP（UTC），
+    混着写会出现「刚答的题显示成 8 小时前」这种时区错位。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    value = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+    conn.close()
+    return value
+
+
 def add_course_question(course_id, chapter_id, question, answer=""):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

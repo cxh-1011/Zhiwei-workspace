@@ -5,7 +5,12 @@
 >
 > **进度：第 ① 步（表与函数）已落地**（commit `2fba7e9`，tag `v0.17.0-quiz-db`）。
 > 三张表、`course_progress` 两列、8 个存取函数、`test_quiz_db.py` 88 项已通过；
-> 真实 `chats.db` 已迁移。下一步是 ② `backend/quiz.py` 判分规则。
+> 真实 `chats.db` 已迁移。
+>
+> **第 ② 步（判分规则）已落地**（`backend/quiz.py`，tag `v0.18.0-quiz-grade`）：
+> 三种题型判分、题库校验、`public_items` 剥答案、`chapter_state` 合并作答、
+> `grade_with_model` 兜底、`record()` 判分即落库。`test_quiz.py` 142 项通过。
+> 下一步是 ③ 诊断卷 + 第 1/7/19 章题库。
 
 ## 0. 动手前必须先认的三件事
 
