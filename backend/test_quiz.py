@@ -209,6 +209,21 @@ def test_rubric():
 
     check("没配要点时不判错人", quiz.grade({"kind": "rubric"}, "一段足够长的作答内容")["score"] == 0)
 
+    # 反例被否定过就不再算命中。开放题里正确回答常常是「不是A，而是B」，
+    # 照字面判会把对的判成 0——这类误判用户没法申诉，一出现就没人再信判分。
+    deny = {"kind": "rubric", "stem": "谁发请求",
+            "must": [{"any": ["模型输出"]}, {"any": ["你的代码"]}, {"any": ["塞回"]}],
+            "forbid": ["模型自己发请求"]}
+    good = quiz.grade(deny, "不是模型自己发请求，模型输出 json 之后由你的代码执行，再把结果塞回对话")
+    check("反例被否定时不算命中", good["score"] == 100, good)
+    bad = quiz.grade(deny, "模型自己发请求，模型输出 json，然后塞回对话")
+    check("反例被肯定时仍然命中", bad["score"] == 0, bad)
+    tail_neg = quiz.grade(deny, "模型自己发请求是不对的，模型输出 json 再由你的代码塞回对话")
+    check("否定词在后面也认", tail_neg["score"] == 100, tail_neg)
+    # 前后各说一半时不能整体当否定，必须逐次出现判断
+    mixed = quiz.grade(deny, "模型自己发请求是对的，模型输出 json，你的代码只负责塞回")
+    check("先肯定后否定仍算命中", mixed["score"] == 0, mixed)
+
     # 要点写成整句几乎不会命中，这是写题库的人最容易犯的错，用测试把它钉住
     sentence = {"kind": "rubric", "must": ["token 数量不同"]}
     result = quiz.grade(sentence, "token 数量不一样")

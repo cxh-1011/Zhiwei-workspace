@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s3c1",
+  "source": "第 7 章 模型其实不会调工具",
+  "items": [
+    {
+      "id": "s3c1-q1",
+      "kind": "choice",
+      "objective": 2,
+      "level": 1,
+      "stem": "一次 function calling 里，下面哪件事是模型真的做了的？",
+      "options": [
+        "A. 向天气接口发出了 HTTP 请求",
+        "B. 输出了一段像 {\"name\": ..., \"arguments\": ...} 的字符串",
+        "C. 解析 arguments 并执行了函数",
+        "D. 把接口返回的 JSON 格式化成了人话"
+      ],
+      "answer": "B",
+      "explain": "模型只做「写」：按训练时见过的 pattern 吐出一段长得像调用的字符串。发请求、json.loads、真正执行函数、把结果塞回对话，全是你写的那几行 if name == \"get_weather\": 干的。少任何一段，都不算真的调用了工具。"
+    },
+    {
+      "id": "s3c1-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "msg.tool_calls[0].function.arguments 拿到的是 JSON ____，必须先 json.loads 才能取字段（填「字符串」或「对象」）。",
+      "blanks": [["字符串", "string", "str", "文本"]],
+      "explain": "官方 SDK 不会替你解析 arguments，它就是一段原始文本：'{\"city\": \"北京\"}'。直接写 arguments[\"city\"] 会报 TypeError，因为字符串只能用下标取单个字符。正确写法是 json.loads(arguments)[\"city\"]。"
+    },
+    {
+      "id": "s3c1-q3",
+      "kind": "rubric",
+      "objective": 0,
+      "level": 2,
+      "stem": "从用户说「查北京天气」到模型最终说出「26℃」，中间有哪几段？每段由谁完成？",
+      "must": [
+        {
+          "point": "模型生成调用请求（name + arguments）",
+          "any": ["模型输出", "模型生成", "模型写", "输出 json", "返回 json", "tool_calls", "调用请求"]
+        },
+        {
+          "point": "你的代码解析并真正执行",
+          "any": ["你的代码", "程序", "代码执行", "我写的", "执行的代码", "解析", "调 api"]
+        },
+        {
+          "point": "执行结果塞回对话，模型接着推理",
+          "any": ["塞回", "放回", "回填", "喂回", "再喂", "observation", "观察结果", "结果给模型"]
+        }
+      ],
+      "forbid": ["模型自己发请求", "模型直接返回天气数据"],
+      "explain": "三段：① 模型输出 {\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"}；② 你的代码 json.loads、调接口、拿到 {\"temperature\": 26}；③ 把结果作为一条 tool 消息塞回对话，模型才「看见」26 并组织成人话。这段闭环就是第 8 章要补的后半段。"
+    }
+  ]
+}

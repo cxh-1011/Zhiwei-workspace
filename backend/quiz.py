@@ -106,6 +106,40 @@ def _sub_hit(word, text):
     return bool(needle) and needle in text
 
 
+# 反例命中前的否定词。开放题里正确回答经常先否认再解释：
+# 「不是模型自己发请求，而是你的代码去执行」——如果照字面判，这句话会被判成
+# 结论反了，而它恰恰是对的。这类误判比漏判更伤：用户答对了却得 0。
+_NEG_BEFORE = ("不是", "并不是", "而不是", "不能", "不会", "不要", "不用",
+               "不该", "并非", "无需", "别把", "别让", "禁止")
+_NEG_AFTER = ("是错的", "是不对的", "不对", "不行", "不成立", "不可能", "错了", "是误解")
+
+# 否定词只在紧邻的一小段里认，不能全文搜：否则「不是……而且模型自己发请求」
+# 这种前后各说一半的句子会被误当成否定，真正的错误结论反而漏掉。
+_NEG_WINDOW = 6
+
+
+def _negated(text, start, length):
+    """text[start:start+length] 处的这一段说法，是否被紧邻的否定词否掉了。"""
+    before = text[max(0, start - _NEG_WINDOW):start]
+    if any(marker in before for marker in _NEG_BEFORE):
+        return True
+    after = text[start + length:start + length + _NEG_WINDOW]
+    return any(marker in after for marker in _NEG_AFTER)
+
+
+def _forbid_hit(word, text):
+    """反例是否被「肯定地」说了出来。被否定过的出现不算命中。"""
+    needle = _norm(word)
+    if not needle:
+        return False
+    start = text.find(needle)
+    while start != -1:
+        if not _negated(text, start, len(needle)):
+            return True
+        start = text.find(needle, start + 1)
+    return False
+
+
 def _point_hit(point, text):
     """一个要点是否命中。
 
@@ -244,7 +278,7 @@ def _grade_rubric(item, answer):
     if len(text) < MIN_ANSWER_CHARS:
         return _fail("作答太短（少于 %d 个字），看不出你是否真的理解" % MIN_ANSWER_CHARS)
 
-    blocked = [str(word) for word in forbid if _sub_hit(word, text)]
+    blocked = [str(word) for word in forbid if _forbid_hit(word, text)]
     if blocked:
         # 关键词全中但结论反了，是开放题判分最常见的漏判，只能靠反例挡
         return _result(0, "结论反了：「%s」这句和正确答案相反" % blocked[0])
@@ -484,6 +518,147 @@ def record(chapter_id, item, answer, seconds=0, course_id=DEFAULT_COURSE, result
         quiz_score=result["score"], quiz_at=database.now_text(),
     )
     return result, chapter_state(chapter_id, course_id)
+
+
+# ---------- 诊断卷 ----------
+
+# 诊断卷固定在 quiz/_diagnostic.json。它不按章组织，所以不能用 load_quiz——
+# 那里会先校验 id 前缀，_diagnostic 会被当成非法章 id 打回。
+DIAGNOSTIC_FILE = "quiz/_diagnostic.json"
+
+# 诊断卷只出选择题和填空题，两种都能确定性判分。
+_DIAGNOSTIC_KINDS = ("choice", "blank")
+
+# 诊断最多给到 level 2。理由不是保守，而是这三档的定义：
+# 1 听过、2 能写、3 能讲。选择和填空只能证明「认得」，证明不了「能讲」，
+# 所以 level 3 只能由章节里的 rubric 题给——那个才真的要求把话说清楚。
+DIAGNOSTIC_MAX_LEVEL = 2
+
+
+def _diagnostic_file(course_id):
+    if not _ID_RE.match(course_id or ""):
+        raise QuizError("课程 id 不合法：%s" % course_id)
+    return CURRICULUM_ROOT / course_id / DIAGNOSTIC_FILE
+
+
+def load_diagnostic(course_id=DEFAULT_COURSE):
+    """读摸底卷。文件缺失或格式不对都抛 QuizError——这张卷子不是分批写的，
+    它是入口，读不到就等于「摸底」这个功能不存在，不该静默降级成空题。"""
+    path = _diagnostic_file(course_id)
+    if not path.is_file():
+        raise QuizError("找不到诊断卷：%s" % path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise QuizError("诊断卷读不了：%s（%s）" % (path.name, exc)) from exc
+    if not isinstance(data, dict):
+        raise QuizError("诊断卷顶层必须是对象：%s" % path.name)
+    errors = validate_diagnostic(data)
+    if errors:
+        raise QuizError("诊断卷格式有问题：%s" % "；".join(errors[:4]))
+    return data
+
+
+def validate_diagnostic(diagnostic, stages=None):
+    """检查诊断卷，返回问题列表。
+
+    stages 传进来时校验 stage 是否存在于课程里——写错一个 stage 会让整组题
+    的分数落到一个不存在的画像行上，而画像是按 stage 主键 upsert 的，
+    多出来的那一行永远不会被读到，属于「看着有数据、实际全丢」的那种错。
+    """
+    problems = []
+    items = (diagnostic or {}).get("items")
+    if not isinstance(items, list) or not items:
+        return ["没有题目"]
+
+    known = set(stages or [])
+    per_stage, seen = {}, set()
+    for index, item in enumerate(items):
+        where = "第 %d 题" % (index + 1)
+        if not isinstance(item, dict):
+            problems.append("%s 不是对象" % where)
+            continue
+
+        item_id = str(item.get("id") or "")
+        stage = str(item.get("stage") or "")
+        if not stage:
+            problems.append("%s 没有 stage" % where)
+        elif known and stage not in known:
+            problems.append("%s 的 stage=%s 不在课程里" % (where, stage))
+        elif stage:
+            per_stage.setdefault(stage, 0)
+            per_stage[stage] += 1
+
+        if not item_id.startswith("diag-%s-" % (stage or "?")):
+            problems.append("%s 的 id 应该是 diag-%s-qN，实际是 %s" % (where, stage or "sN", item_id or "空"))
+        if item_id in seen:
+            problems.append("%s 的 id 重复：%s" % (where, item_id))
+        seen.add(item_id)
+
+        kind = item.get("kind")
+        if kind not in _DIAGNOSTIC_KINDS:
+            # 诊断卷不允许 rubric：20 道开放题既答不完，也没法当场出分
+            problems.append("%s 的 kind 只能是 choice/blank，实际是 %s" % (where, kind))
+            continue
+
+        if not str(item.get("stem") or "").strip():
+            problems.append("%s 没有题干" % where)
+
+        # 单题的格式规则与章节题库完全一致，复用一套，避免两处校验慢慢分叉
+        single = validate_quiz({"chapter_id": "diag-%s" % stage, "items": [dict(item, id=item_id)]})
+        for problem in single:
+            problems.append("%s %s" % (where, problem.replace("第 1 题 ", "", 1)))
+
+    for stage, count in sorted(per_stage.items()):
+        if count != 2:
+            problems.append("%s 有 %d 题，应该正好 2 题" % (stage, count))
+    if known:
+        for stage in sorted(known):
+            if stage not in per_stage:
+                problems.append("%s 一道题都没有" % stage)
+
+    return problems
+
+
+def score_diagnostic(diagnostic, answers):
+    """按阶段汇总诊断结果，返回 {stages: {stage: {...}}, total, correct}。
+
+    answers 是 {item_id: 用户作答}，缺答按错算——诊断卷不支持「跳过」，
+    因为跳过和不会在「要不要从这个阶段开始学」这件事上没有区别。
+
+    分级按「答对几题」而不是百分比：每阶段只有 2 题，百分比只有 0 / 50 / 100
+    三档，40、60、85 这些边界根本落不进去，会有一个等级永远取不到。
+
+    也没给题目设权重（曾试过「进阶题 2 分」），因为那会出现一个荒唐结果：
+    基础题错了、进阶题蒙对，合计 2 分照样判二级，于是整个阶段被跳过。
+    分级直接决定「能不能跳过这段」，宁可保守：两题都对才算 2 级。
+    """
+    answers = answers or {}
+    max_level = min(DIAGNOSTIC_MAX_LEVEL, int((diagnostic or {}).get("max_level") or DIAGNOSTIC_MAX_LEVEL))
+    stages = {}
+    for item in (diagnostic or {}).get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or "")
+        if not stage:
+            continue
+        row = stages.setdefault(stage, {"stage": stage, "correct": 0, "total": 0, "level": 0})
+        row["total"] += 1
+        answer = answers.get(item.get("id"))
+        if answer is None or str(answer).strip() == "":
+            continue
+        if grade(item, answer)["passed"]:
+            row["correct"] += 1
+
+    for row in stages.values():
+        row["level"] = max(0, min(max_level, row["correct"]))
+
+    return {
+        "stages": stages,
+        "total": sum(row["total"] for row in stages.values()),
+        "correct": sum(row["correct"] for row in stages.values()),
+        "max_level": max_level,
+    }
 
 
 # ---------- 模型兜底 ----------
