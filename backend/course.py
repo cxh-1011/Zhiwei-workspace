@@ -70,6 +70,25 @@ def load_chapter(course_id: str, chapter_id: str) -> dict:
         "next": order[index + 1] if index + 1 < len(order) else None,
         "total": len(order),
         "index": index + 1,
+        "quiz": chapter_quiz(course_id, chapter_id),
+    }
+
+
+def chapter_quiz(course_id: str, chapter_id: str) -> dict:
+    """这一章的判分题（已剥掉答案）与作答状态。
+
+    题库还没写的章返回空列表——那是常态，不是错误。题库写坏了则把错误原样带出去：
+    静默当成「这章没题」，写题的人永远发现不了，而用户会以为自己答对了没记录。
+    """
+    import quiz as quiz_lib  # 局部导入：quiz 依赖本模块，写在顶部会循环
+
+    try:
+        data = quiz_lib.load_quiz(chapter_id, course_id)
+    except quiz_lib.QuizError as exc:
+        return {"items": [], "state": None, "error": str(exc)}
+    return {
+        "items": quiz_lib.public_items(data),
+        "state": quiz_lib.chapter_state(chapter_id, course_id, data),
     }
 
 

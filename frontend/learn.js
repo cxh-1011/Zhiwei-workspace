@@ -281,7 +281,9 @@ async function toggleDone(chapter) {
       body: JSON.stringify({
         chapter_id: chapter.id,
         status: target,
-        mastery: target === 'done' ? 2 : 0,
+        // 掌握度不自己填：手点只该给「看懂了」，三题全过才够「自己写出来」。
+        // 服务端按答题记录算，这里填了也会被压回来，索性不填（撤销时清零）。
+        mastery: target === 'done' ? undefined : 0,
       }),
     });
     state.course.progress = result.summary;
@@ -297,7 +299,9 @@ async function toggleDone(chapter) {
     renderProgress();
     renderToc();
     renderNextCard();
-    el('doneHint').textContent = target === 'done' ? '已记录' : '已撤销';
+    el('doneHint').textContent = target === 'done'
+      ? `已记录（掌握度 ${result.progress.mastery}/3，做完自测题才够 2）`
+      : '已撤销';
   } catch (error) {
     button.disabled = false;
     el('doneHint').textContent = error.message;

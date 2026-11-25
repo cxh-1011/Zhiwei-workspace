@@ -506,6 +506,7 @@ def record(chapter_id, item, answer, seconds=0, course_id=DEFAULT_COURSE, result
 
     把「判分」和「写库」放在一个函数里，是为了让调用方不可能只做一半：
     判了不记，用户下次重做时系统不认账；记了不判，库里全是假分数。
+    掌握度回写也挂在这里——漏调一次，判分就退化成一次性对话。
     """
     result = result or grade(item, answer)
     database.add_quiz_attempt(
@@ -517,7 +518,78 @@ def record(chapter_id, item, answer, seconds=0, course_id=DEFAULT_COURSE, result
         course_id, chapter_id,
         quiz_score=result["score"], quiz_at=database.now_text(),
     )
-    return result, chapter_state(chapter_id, course_id)
+    state = chapter_state(chapter_id, course_id)
+    state["mastery"] = apply_mastery(chapter_id, state, course_id)
+    return result, state
+
+
+# ---------- 掌握度回写 ----------
+# mastery 的原始含义：0 没评过 / 1 看懂了 / 2 自己写出来了 / 3 能讲给别人听。
+# 判分只能证明到 2：「三题全过」说明能自己写出来，证明不了能讲清楚，
+# 所以 3 永远不由判分给，只能由人来评。
+
+QUIZ_MASTERY = 2      # 本章题目全部通过
+MANUAL_MASTERY = 1    # 手点「学完」，但没有判分证据
+
+
+def mastery_target(state):
+    """从判分状态推出「该给几级」。返回 None 表示证据不够、不动。
+
+    三条判断按优先级：
+    1. 一题都没答 —— 不动（诊断/手点学完另有入口）；
+    2. 全部答过且全部通过 —— 升到 2；
+    3. 答过的里面有没过的 —— 降到 1（这是唯一能把手点的 2 打回原形的路径）；
+    4. 答了一部分但都对 —— 不动：答对一题不足以说明「能自己写出来」，
+       但也不该因此降级。
+
+    「取最近一次」由 chapter_state 保证，所以之前过、后来答错，这里会判成没过。
+    这是刻意的：掌握度描述的是「现在还会不会」，不是「历史最高分」。
+    """
+    total = int(state.get("total") or 0)
+    answered = int(state.get("answered") or 0)
+    passed = int(state.get("passed") or 0)
+    if total <= 0 or answered <= 0:
+        return None
+    if answered >= total and passed >= total:
+        return QUIZ_MASTERY
+    if passed < answered:
+        return MANUAL_MASTERY
+    return None
+
+
+def apply_mastery(chapter_id, state=None, course_id=DEFAULT_COURSE):
+    """把判分结论写回 course_progress.mastery，返回变更记录。
+
+    升到 2 用 max（不把已经是 3 的人拉回 2）；降到 1 用 min（3 也会降到 1）。
+    只改 mastery，不动 status——status 是「学没学过」的事实，掌握度是「会到什么
+    程度」的判断，混在一起的话，答错一题就会让进度条倒退，用户会以为数据丢了。
+    """
+    state = state or chapter_state(chapter_id, course_id)
+    target = mastery_target(state)
+    current = int((database.list_course_progress(course_id).get(chapter_id) or {}).get("mastery") or 0)
+    if target is None:
+        return {"before": current, "after": current, "changed": False, "target": None,
+                "reason": "作答还不足以判断掌握度"}
+    after = max(current, target) if target >= QUIZ_MASTERY else min(current, target)
+    if after == current:
+        return {"before": current, "after": after, "changed": False, "target": target,
+                "reason": "掌握度已经是 %d，不需要改" % current}
+    database.set_course_progress(course_id, chapter_id, mastery=after)
+    reason = ("这一章 %d 道题都过了" % int(state.get("total") or 0)) if target >= QUIZ_MASTERY \
+        else "有题没过，掌握度按「看懂了」算"
+    return {"before": current, "after": after, "changed": True, "target": target, "reason": reason}
+
+
+def manual_done_mastery(chapter_id, course_id=DEFAULT_COURSE):
+    """手点「学完」时该给几级：没有全过的记录就只能给 1。
+
+    这一条是判分能不能起作用的分水岭。原来前端点一下就写 mastery=2，
+    点三次就能把 33 章刷满，那判分做得再准也没有输入——用户自称的数据
+    和考出来的数据混在同一列里，下游的推荐和排期全都不可信。
+    """
+    if mastery_target(chapter_state(chapter_id, course_id)) == QUIZ_MASTERY:
+        return QUIZ_MASTERY
+    return MANUAL_MASTERY
 
 
 # ---------- 诊断卷 ----------

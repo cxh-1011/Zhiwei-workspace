@@ -33,6 +33,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 from agent import run_agent, run_agent_stream, request_cancel, resolve_approval
 from llm import ModelConfigError, chat_completion, test_connection
 import course as course_lib
+import quiz as quiz_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -1174,12 +1175,65 @@ def update_course_progress(
         course_lib.load_course(course_id)  # 先确认课程存在，别往库里写脏 id
     except course_lib.CourseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    mastery = data.mastery
+    if data.status == "done":
+        # 手点「学完」不能自称掌握度：没有答题记录最多给 1，三题全过才给 2。
+        # 这一条不改就等于留了个后门——点三次就能把 33 章刷成 mastery=2，
+        # 判分做得再准也没有输入。
+        try:
+            cap = quiz_lib.manual_done_mastery(data.chapter_id, course_id)
+        except quiz_lib.QuizError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        mastery = cap if mastery is None else min(mastery, cap)
+
     progress = set_course_progress(
         course_id, data.chapter_id,
-        status=data.status, mastery=data.mastery, notes=data.notes,
+        status=data.status, mastery=mastery, notes=data.notes,
     )
     decorated = course_lib.decorate(course_lib.load_course(course_id), course_id)
     return {"progress": progress, "summary": decorated["progress"], "next": decorated["next"]}
+
+
+class QuizSubmitRequest(BaseModel):
+    item_id: str = Field(..., min_length=2, max_length=64)
+    answer: str = Field("", max_length=4000)
+    seconds: int = Field(0, ge=0, le=3600)
+
+
+@app.post("/quiz/{chapter_id}/submit")
+def submit_quiz_answer(
+    chapter_id: str, data: QuizSubmitRequest, course_id: str = course_lib.DEFAULT_COURSE
+):
+    """答一道题：判分 → 落库 → 回写成绩与掌握度，一次做完。
+
+    三件事绑在一个接口里，是为了让前端不可能「只提交不记录」。
+    explain 只在这里返回，GET 章节时不下发——发了就等于把答案公开。
+    """
+    try:
+        quiz_data = quiz_lib.load_quiz(chapter_id, course_id)
+    except quiz_lib.QuizError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    item = next((row for row in quiz_data["items"] if row.get("id") == data.item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="这一章没有这道题：%s" % data.item_id)
+
+    # 本地判分已经确定时不会走模型；只有「说到一部分但不够」才兜一次
+    result = quiz_lib.grade_with_model(item, data.answer)
+    result, state = quiz_lib.record(
+        chapter_id, item, data.answer,
+        seconds=data.seconds, course_id=course_id, result=result,
+    )
+    return {
+        "item_id": item.get("id"),
+        "score": result["score"],
+        "passed": result["passed"],
+        "detail": result["detail"],
+        "grader": result["grader"],
+        "explain": item.get("explain") or "",
+        "quiz": state,
+        "mastery": state.get("mastery"),
+    }
 
 
 if os.path.isdir(FRONTEND_DIR):
