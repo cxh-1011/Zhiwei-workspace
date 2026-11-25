@@ -138,6 +138,69 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_course_questions_ch ON course_questions(course_id, chapter_id)")
 
+    # 每一次作答。只增不改（除了 flagged），因为「判过的题改了分」比没有记录更糟：
+    # 没有记录只是缺点信息，改了分是伪造事实。
+    #
+    # passed 和 score 分开存：score 是这一题算出来的数，passed 是「按当时的阈值
+    # 算出的结论」。阈值以后一定会调（开放题判分调阈值是常态），结论必须留痕，
+    # 否则上周判过的题这周变成没过，用户会以为系统在乱改。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS quiz_attempts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        passed INTEGER NOT NULL,
+        grader TEXT NOT NULL,
+        detail TEXT DEFAULT '',
+        seconds INTEGER DEFAULT 0,
+        flagged INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_quiz_attempts_ch ON quiz_attempts(course_id, chapter_id, created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_quiz_attempts_item ON quiz_attempts(course_id, item_id, created_at)")
+
+    # 能力画像：10 行，一个阶段一行。
+    #
+    # 刻意不做 33 章的粒度。定制学习路线的决策单位是「从哪个阶段插进去」，
+    # 不是「跳过哪一章」；章级精度已经由 course_progress.mastery 承担，
+    # 再存一份就是两套真相，迟早对不上。
+    #
+    # evidence 存「诊断卷 4/20、9/20」这种能回溯的依据。没有它，一个不知道
+    # 从哪来的 level=3 和编出来的数字没区别。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS profile_skills(
+        course_id TEXT NOT NULL,
+        skill TEXT NOT NULL,
+        level INTEGER DEFAULT 0,
+        evidence TEXT DEFAULT '',
+        source TEXT DEFAULT 'diagnostic',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (course_id, skill)
+    )
+    """)
+
+    # 一次诊断的结论。明细照样进 quiz_attempts（item_id 用 diag- 前缀），
+    # 这张表只回答「哪一次测的、多少分、什么时候」，用来算分级和显示「上次测过没」。
+    # payload 留着每题作答，为的是事后能拿它去对拍判分规则——规则改过之后
+    # 唯一能验证「改了到底对不对」的办法。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS diagnostics(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id TEXT NOT NULL,
+        finished_at TEXT,
+        total INTEGER NOT NULL DEFAULT 0,
+        correct INTEGER NOT NULL DEFAULT 0,
+        payload TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_diagnostics_course ON diagnostics(course_id, id)")
+
 
 
     cursor.execute("""
@@ -173,6 +236,12 @@ def init_db():
 
     # agent_steps 记录每一轮的思考摘要，回看历史时能还原「模型当时怎么想的」
     _ensure_column(cursor, "agent_steps", "reasoning", "TEXT")
+
+    # 课程进度补两列：判分成绩与最近作答时间。
+    # 目录上的红绿灯直接读 quiz_score，不用每次去 quiz_attempts 里倒查。
+    # 不存 passed：过没过要跟着阈值走，存下来只会和阈值打架。
+    _ensure_column(cursor, "course_progress", "quiz_score", "INTEGER")
+    _ensure_column(cursor, "course_progress", "quiz_at", "TEXT")
 
     conn.commit()
 
@@ -682,22 +751,41 @@ def replace_unfinished_learning_tasks(plan_id, tasks):
 # ---------- 课程进度 ----------
 
 def list_course_progress(course_id):
-    """返回 {chapter_id: {...}}。没有记录的章节不在结果里，由上层补 todo。"""
+    """返回 {chapter_id: {...}}。没有记录的章节不在结果里，由上层补 todo。
+
+    这里用 SELECT * + 列名映射，不写死列名。原因不是图省事：这张表会随功能加列
+    （quiz_score / quiz_at 就是这么加的），写死列名意味着「旧库还没跑 init_db」
+    时整个查询直接抛 no such column。而调用方多半用 try/except 兜着——错误被
+    静默吞掉，表现成「导师不知道你在第几章」，比直接报错难查得多。
+
+    语义上也是对的：库里没有这条信息，就该表现为「不知道」，而不是整件事失败。
+    """
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT chapter_id,status,mastery,notes,updated_at FROM course_progress WHERE course_id=?",
-        (course_id,),
-    ).fetchall()
+    cursor = conn.execute("SELECT * FROM course_progress WHERE course_id=?", (course_id,))
+    names = [column[0] for column in cursor.description]
+    rows = cursor.fetchall()
     conn.close()
-    return {
-        row[0]: {"status": row[1] or "todo", "mastery": int(row[2] or 0),
-                 "notes": row[3] or "", "updated_at": row[4]}
-        for row in rows
-    }
+    result = {}
+    for row in rows:
+        item = dict(zip(names, row))
+        result[item["chapter_id"]] = {
+            "status": item.get("status") or "todo",
+            "mastery": int(item.get("mastery") or 0),
+            "notes": item.get("notes") or "",
+            "updated_at": item.get("updated_at"),
+            "quiz_score": item.get("quiz_score"),
+            "quiz_at": item.get("quiz_at"),
+        }
+    return result
 
 
-def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=None):
-    """只更新传进来的字段。status 与 mastery 分开，是因为「看过」和「学会」是两件事。"""
+def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=None,
+                        quiz_score=None, quiz_at=None):
+    """只更新传进来的字段。status 与 mastery 分开，是因为「看过」和「学会」是两件事。
+
+    quiz_score / quiz_at 由判分接口回写，不跟 status 混：答完题不等于学完这一章，
+    反过来学完也不等于答得过。
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -714,6 +802,12 @@ def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=
     if notes is not None:
         sets.append("notes=?")
         params.append(notes)
+    if quiz_score is not None:
+        sets.append("quiz_score=?")
+        params.append(max(0, min(100, int(quiz_score))))
+    if quiz_at is not None:
+        sets.append("quiz_at=?")
+        params.append(quiz_at)
     if sets:
         sets.append("updated_at=CURRENT_TIMESTAMP")
         params.extend([course_id, chapter_id])
@@ -723,11 +817,13 @@ def set_course_progress(course_id, chapter_id, status=None, mastery=None, notes=
         )
     conn.commit()
     row = cursor.execute(
-        "SELECT status,mastery,notes,updated_at FROM course_progress WHERE course_id=? AND chapter_id=?",
+        "SELECT status,mastery,notes,updated_at,quiz_score,quiz_at FROM course_progress "
+        "WHERE course_id=? AND chapter_id=?",
         (course_id, chapter_id),
     ).fetchone()
     conn.close()
-    return {"status": row[0], "mastery": int(row[1] or 0), "notes": row[2] or "", "updated_at": row[3]}
+    return {"status": row[0], "mastery": int(row[1] or 0), "notes": row[2] or "",
+            "updated_at": row[3], "quiz_score": row[4], "quiz_at": row[5]}
 
 
 def add_course_question(course_id, chapter_id, question, answer=""):
@@ -762,6 +858,165 @@ def list_course_questions(course_id, chapter_id=None, limit=30):
         {"id": r[0], "chapter_id": r[1], "question": r[2], "answer": r[3], "created_at": r[4]}
         for r in rows
     ]
+
+
+# ======================
+# 答题记录与能力画像
+# ======================
+#
+# 这一层只负责存取事实，不判断对错：判分规则在 quiz.py，分级规则在 profile.py。
+# 分开的理由很实际——判分阈值和分级阈值都会反复调，而表结构不该跟着动。
+#
+# 三张表的分工：
+# - quiz_attempts：每一次作答（事实，只增）
+# - profile_skills：他现在什么水平（结论，可被下次诊断覆盖）
+# - diagnostics：哪一次诊断得出了这个结论（来源，可回溯）
+
+
+def add_quiz_attempt(course_id, chapter_id, item_id, kind, answer,
+                     score=0, passed=0, grader="local", detail="", seconds=0):
+    """记一次作答，返回新行 id。
+
+    answer 不截断到几百字：要点判分要看完整作答，截了就等于改了用户的答案。
+    score 夹到 0-100 再入库，前端就不用到处防越界。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO quiz_attempts"
+        "(course_id,chapter_id,item_id,kind,answer,score,passed,grader,detail,seconds) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (course_id, chapter_id, item_id, kind, (answer or "")[:20000],
+         max(0, min(100, int(score or 0))), 1 if passed else 0,
+         grader or "local", (detail or "")[:4000], max(0, int(seconds or 0))),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def list_quiz_attempts(course_id, chapter_id=None, item_id=None, limit=50):
+    """按时间倒序取作答记录。三个筛选取交集，都不传就是整门课最近的若干条。"""
+    sql = ("SELECT id,chapter_id,item_id,kind,answer,score,passed,grader,detail,"
+           "seconds,flagged,created_at FROM quiz_attempts WHERE course_id=?")
+    params = [course_id]
+    if chapter_id:
+        sql += " AND chapter_id=?"
+        params.append(chapter_id)
+    if item_id:
+        sql += " AND item_id=?"
+        params.append(item_id)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, int(limit or 50)))
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [
+        {"id": r[0], "chapter_id": r[1], "item_id": r[2], "kind": r[3], "answer": r[4],
+         "score": int(r[5] or 0), "passed": bool(r[6]), "grader": r[7], "detail": r[8],
+         "seconds": int(r[9] or 0), "flagged": bool(r[10]), "created_at": r[11]}
+        for r in rows
+    ]
+
+
+def latest_quiz_scores(course_id):
+    """{chapter_id: {"score": 最近一次的分数, "at": 时间}}。
+
+    一次查全，给 course.decorate 用。刻意不提供「逐章查一次」的函数：
+    33 章就是 33 次连接，目录每刷一次都要付这个代价。
+
+    注意这里只回答「最近这一回考得怎么样」。整轮成绩（3 题里过几题）
+    由 quiz.chapter_state 现算——那是另一个问题，不该混进这张表。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT chapter_id, score, created_at FROM quiz_attempts "
+        "WHERE course_id=? AND id IN "
+        "(SELECT MAX(id) FROM quiz_attempts WHERE course_id=? GROUP BY chapter_id)",
+        (course_id, course_id),
+    ).fetchall()
+    conn.close()
+    return {r[0]: {"score": int(r[1] or 0), "at": r[2]} for r in rows}
+
+
+def flag_quiz_attempt(attempt_id, flagged=1):
+    """用户标「这题判错了」。只改标记，不改分数——判错是判分器的问题，
+    不是这次作答的问题，把分数改掉就再也查不出规则哪里错了。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE quiz_attempts SET flagged=? WHERE id=?",
+        (1 if flagged else 0, int(attempt_id)),
+    )
+    conn.commit()
+    changed = cursor.rowcount > 0
+    conn.close()
+    return changed
+
+
+def upsert_profile_skill(course_id, skill, level, evidence="", source="diagnostic"):
+    """写一个阶段的水平。重测会覆盖上一次——画像是「现在」的状态，不是档案。
+
+    level 夹到 0-3：0 未测 / 1 听过 / 2 能写 / 3 能讲。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO profile_skills(course_id,skill,level,evidence,source) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(course_id,skill) DO UPDATE SET "
+        "level=excluded.level, evidence=excluded.evidence, source=excluded.source, "
+        "updated_at=CURRENT_TIMESTAMP",
+        (course_id, skill, max(0, min(3, int(level or 0))),
+         (evidence or "")[:1000], source or "diagnostic"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_profile_skills(course_id):
+    """{skill: {...}}。没有记录的阶段不在结果里，由上层按 0 处理。"""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT skill,level,evidence,source,updated_at FROM profile_skills WHERE course_id=?",
+        (course_id,),
+    ).fetchall()
+    conn.close()
+    return {
+        r[0]: {"level": int(r[1] or 0), "evidence": r[2] or "",
+               "source": r[3] or "diagnostic", "updated_at": r[4]}
+        for r in rows
+    }
+
+
+def save_diagnostic(course_id, total, correct, payload=""):
+    """存一次诊断的结论。payload 是每题作答的 JSON，用来事后对拍判分规则。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO diagnostics(course_id,finished_at,total,correct,payload) "
+        "VALUES(?,CURRENT_TIMESTAMP,?,?,?)",
+        (course_id, max(0, int(total or 0)), max(0, int(correct or 0)),
+         (payload or "")[:20000]),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def latest_diagnostic(course_id):
+    """最近一次诊断；从没测过返回 None。界面据此决定要不要显示「先测一下」的入口。"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id,finished_at,total,correct,payload,created_at FROM diagnostics "
+        "WHERE course_id=? ORDER BY id DESC LIMIT 1",
+        (course_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"id": row[0], "finished_at": row[1], "total": int(row[2] or 0),
+            "correct": int(row[3] or 0), "payload": row[4] or "", "created_at": row[5]}
 
 
 # ======================
