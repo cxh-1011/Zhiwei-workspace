@@ -7,11 +7,15 @@
    物理像素，截图的坐标和点击的坐标是同一个坐标系。
 2. 少一层依赖就少一处「pip 装不上 / 版本冲突」的故障点。Win32 API 是系统自带的。
 
-安全边界（三道）
+安全边界（四道）
 ----------------
 1. **工具层自查授权**：context 里没有 allow_desktop=True 就拒绝，不依赖调用方。
-2. **动作预算**：单次运行最多 MAX_ACTIONS 次桌面动作，防止模型在界面里原地打转。
-3. **危险键位与非法参数直接拒绝**：Alt+F4、Win+R、Win+L 这类组合，以及越界的坐标。
+2. **单会话锁**：同一台机器同一时间只允许一个 run 动鼠标键盘。两个会话同时操作会
+   互相抢前台——实测撞过：网页端在点抖音、本地会话在点百度，截图拍到的全是对方窗口，
+   视觉模型连续三次答「这不是百度页面」，点下去还会点错。锁按 run_id 记，90 秒没有
+   新动作就算对方已经结束。
+3. **动作预算**：单次运行最多 MAX_ACTIONS 次桌面动作，防止模型在界面里原地打转。
+4. **危险键位与非法参数直接拒绝**：Alt+F4、Win+R、Win+L 这类组合，以及越界的坐标。
 
 所有动作都写进 desktop_shots/actions.log，出事后能回看到底点了哪里。
 """
@@ -103,8 +107,87 @@ def _log(action: str, detail: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------- 会话锁
+#
+# 为什么需要锁：鼠标键盘是整台机器共享的一份，没有「每个会话一套」。两个会话同时
+# 操作时，甲切了窗口、乙截图就拍到甲的界面，甲点 (339,205) 可能落在乙刚打开的页面上。
+# 实测过一次（16:27）：网页端在点抖音，本地会话在点百度，截图连续三次被对方抢走。
+#
+# 为什么不直接用文件独占句柄：会话可能被用户中途关掉，句柄不会自己释放；用
+# 「run_id + 最后动作时间」这种软锁，卡住的会话最多 90 秒后自动让位。
+
+# 超过这么久没有新动作，就认为那个会话已经结束，可以接管
+SESSION_LEASE = 90
+
+
+def _lock_path() -> str:
+    return os.path.join(SHOT_DIR, "active-session.json")
+
+
+def _read_session() -> dict:
+    try:
+        with open(_lock_path(), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_session(run_id: str) -> None:
+    """记下当前会话并刷新时间戳。写不进去就不写——锁坏了不该拦住用户。"""
+    try:
+        os.makedirs(SHOT_DIR, exist_ok=True)
+        with open(_lock_path(), "w", encoding="utf-8") as handle:
+            json.dump({"run": run_id, "pid": os.getpid(), "ts": time.time()}, handle)
+    except OSError:
+        pass
+
+
+def _session_key(context: dict) -> str:
+    return str(context.get("run_id") or "").strip() or "anonymous"
+
+
+def _claim_session(context: dict) -> ToolResult | None:
+    """抢占桌面。别人正占着就拒绝，返回 None 表示拿到手了。"""
+    key = _session_key(context)
+    data = _read_session()
+    owner = str(data.get("run") or "")
+    if owner and owner != key:
+        try:
+            age = time.time() - float(data.get("ts") or 0)
+        except (TypeError, ValueError):
+            age = SESSION_LEASE + 1
+        if age < SESSION_LEASE:
+            return ToolResult(
+                False, "",
+                error="另一个会话正在操作桌面（%s，%d 秒前还有动作）。"
+                "两个会话同时动鼠标会互相打断：截图可能是对方的界面，点下去会点错。"
+                "等它结束再来；如果那个会话已经关了，最多 %d 秒后会自动让位。"
+                % (owner[:16], int(age), SESSION_LEASE),
+            )
+    _write_session(key)
+    return None
+
+
+def release_desktop_session(run_id: str = "") -> None:
+    """跑完主动放锁。
+
+    只放自己的：如果传了 run_id 而锁在别人手里，说明那个会话还在跑，不能碰它的锁。
+    不主动放锁的话，用户刚跑完一次，90 秒内换个会话再操作会被自己上次的锁挡住，
+    看起来像「莫名其妙用不了」。
+    """
+    data = _read_session()
+    owner = str(data.get("run") or "")
+    if run_id and owner and owner != str(run_id):
+        return
+    try:
+        os.remove(_lock_path())
+    except OSError:
+        pass
+
+
 def _gate(context: dict) -> ToolResult | None:
-    """权限与预算的公共闸门。返回非 None 表示应当直接拒绝。"""
+    """权限、会话锁与预算的公共闸门。返回非 None 表示应当直接拒绝。"""
     if not context.get("allow_desktop"):
         return ToolResult(
             False, "", error="没有开启「允许操作桌面」，拒绝执行。"
@@ -112,6 +195,9 @@ def _gate(context: dict) -> ToolResult | None:
         )
     if not IS_WINDOWS:
         return ToolResult(False, "", error="桌面操作目前只支持 Windows。")
+    blocked = _claim_session(context)
+    if blocked:
+        return blocked
     used = int(context.get("desktop_actions") or 0)
     if used >= MAX_ACTIONS:
         return ToolResult(
@@ -199,6 +285,8 @@ def _open_url(args: dict, context: dict) -> ToolResult:
     except (ValueError, RuntimeError, OSError) as error:
         return ToolResult(False, "", error=str(error))
     _log("open_url", "%s -> %s" % (url, target))
+    # 记一笔：浏览器打开网址后焦点停在地址栏。后面按页面键或输入时据此先按 esc。
+    context["desktop_fresh_open"] = True
     return ToolResult(
         True,
         "已用 %s 打开：%s\n浏览器可能需要一两秒才渲染完。"
@@ -367,6 +455,8 @@ def _focus_window(args: dict, context: dict) -> ToolResult:
         )
     target = matched[0]
     ok = _focus_handle(target["handle"])
+    # 换过窗口，键盘的落点已经由用户/这条指令重新确定了，不再当作「刚打开的页面」
+    context["desktop_fresh_open"] = False
     _log("focus_window", "%s -> %s" % (title, target["title"][:60]))
     if not ok:
         return ToolResult(
@@ -434,6 +524,108 @@ def _press_combo(combo: str) -> str:
     return combo
 
 
+# 这些键的接收者应该是网页本身。焦点落在地址栏时按下去等于白按。
+PAGE_KEYS = {"pagedown", "pageup", "home", "end", "space", "up", "down"}
+
+# 地址栏（omnibox）在不同 Chromium 版本里的窗口类名
+ADDRESS_BAR_CLASSES = {"edit", "chrome_omniboxview", "chrome_omniboxviewviews"}
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wt.DWORD),
+        ("flags", wt.DWORD),
+        ("hwndActive", wt.HWND),
+        ("hwndFocus", wt.HWND),
+        ("hwndCapture", wt.HWND),
+        ("hwndMenuOwner", wt.HWND),
+        ("hwndMoveSize", wt.HWND),
+        ("hwndCaret", wt.HWND),
+        ("rcCaret", wt.RECT),
+    ]
+
+
+def _focused_control() -> dict:
+    """读当前焦点控件的类名，以及它和所在窗口的矩形。读不到返回空 dict。"""
+    if not IS_WINDOWS:
+        return {}
+    try:
+        hwnd = _user32.GetForegroundWindow()
+        if not hwnd:
+            return {}
+        thread = _user32.GetWindowThreadProcessId(hwnd, None)
+        info = _GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+        if not _user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            return {}
+        focus = info.hwndFocus
+        if not focus:
+            return {}
+        buffer = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(focus, buffer, 128)
+        rect, window = wt.RECT(), wt.RECT()
+        if not _user32.GetWindowRect(focus, ctypes.byref(rect)):
+            return {}
+        if not _user32.GetWindowRect(hwnd, ctypes.byref(window)):
+            return {}
+        return {
+            "class": buffer.value,
+            "rect": (rect.left, rect.top, rect.right, rect.bottom),
+            "window": (window.left, window.top, window.right, window.bottom),
+        }
+    except Exception:
+        return {}
+
+
+def _focus_in_address_bar() -> bool:
+    """焦点是不是在一个「像地址栏」的编辑框里。
+
+    注意：这条判据对 Chromium 无效——Chrome/Edge 的地址栏不是独立子窗口，而是自己
+    画的 Views 控件，GetGUIThreadInfo 拿到的 hwndFocus 始终是主窗口
+    （Chrome_WidgetWin_1）。实测按了 ctrl+l、地址栏明明已经选中，这个函数仍返回 False。
+    所以真正管用的是 open_url 留下的「刚打开过页面」信号，见 _press_keys。
+
+    这里保留这个判据是为了非 Chromium 的程序（旧版 IE、Win32 浏览器），它的判据是：
+    类名像编辑框，且贴在窗口顶部、横跨大半个窗口宽度——地址栏就是这个形状，
+    页面里的输入框在窗口中部、宽度也窄。
+    """
+    info = _focused_control()
+    if not info:
+        return False
+    if info["class"].lower() not in ADDRESS_BAR_CLASSES:
+        return False
+    win_left, win_top, win_right, win_bottom = info["window"]
+    left, top, right, _bottom = info["rect"]
+    win_width = win_right - win_left
+    if win_width <= 0:
+        return False
+    near_top = (top - win_top) <= max(80, int((win_bottom - win_top) * 0.12))
+    wide = (right - left) >= win_width * 0.3
+    return bool(near_top and wide)
+
+
+def _maybe_leave_address_bar(context: dict, what: str) -> str:
+    """刚打开过页面时，焦点还在地址栏：先按 esc 交还给页面，再做下一步。
+
+    实测（16:30）：open_url 之后按 pagedown / alt+left 全部无效——工具返回「已按下」，
+    页面一动不动。模型据此以为翻过页了，继续在旧截图上算坐标，越走越远。更糟的是
+    type_text：文字会直接粘进地址栏，把刚打开的网址改掉。
+
+    esc 在这一步是安全的：焦点在地址栏时它只是收起地址栏下拉、把焦点还给页面；
+    只有在焦点已经在页面上时它才会去中止加载，而那时桌面刚打开过这件事已经被清掉了。
+    """
+    if not context.get("desktop_fresh_open"):
+        return ""
+    try:
+        _press_combo("escape")
+        time.sleep(0.1)
+    except ValueError:
+        return ""
+    context["desktop_fresh_open"] = False
+    _log("press_keys", "escape（自动：刚打开页面，焦点在地址栏）")
+    return "\n注意：刚打开页面时焦点在地址栏，已先按 esc 把焦点还给页面，再%s。" % what
+
+
 def _press_keys(args: dict, context: dict) -> ToolResult:
     blocked = _gate(context)
     if blocked:
@@ -452,12 +644,22 @@ def _press_keys(args: dict, context: dict) -> ToolResult:
         return ToolResult(False, "", error="不认识的键：%s。可用的有 ctrl/alt/shift/win、"
                                           "enter/tab/esc/space/backspace/delete、方向键、f1–f12、字母数字。"
                           % "、".join(unknown))
+
+    # 页面类按键要发给网页，不是地址栏。刚打开过页面时先按 esc 把焦点交还页面，
+    # 否则 pagedown / home / 方向键会被地址栏吃掉，看起来「按了但没反应」。
+    note = ""
+    parts = [p for p in re.split(r"\s*\+\s*", combo) if p]
+    if len(parts) == 1 and parts[0] in PAGE_KEYS:
+        note = _maybe_leave_address_bar(context, "按 %s" % combo)
+
     try:
         _press_combo(combo)
     except ValueError as error:
         return ToolResult(False, "", error=str(error))
+    # 按过键之后，焦点归谁已经明确了，后续动作不再需要这个提示
+    context["desktop_fresh_open"] = False
     _log("press_keys", combo)
-    return ToolResult(True, "已按下：%s" % combo)
+    return ToolResult(True, "已按下：%s%s" % (combo, note))
 
 
 CF_UNICODETEXT = 13
@@ -521,14 +723,19 @@ def _type_text(args: dict, context: dict) -> ToolResult:
             error="一次最多输入 %d 个字符（这次 %d）。请拆成几次，或者只输入关键词。"
             % (MAX_TYPE_CHARS, len(text)),
         )
+    # 刚打开页面就输入，文字会粘进地址栏，把刚打开的网址改掉——这是比「按了没反应」
+    # 更隐蔽的错：页面确实变了，但变的是网址。先 esc 把焦点交还页面。
+    note = _maybe_leave_address_bar(context, "粘贴")
     try:
         _paste_text(text)
     except RuntimeError as error:
         return ToolResult(False, "", error=str(error))
+    context["desktop_fresh_open"] = False
     _log("type_text", text[:80].replace("\n", " "))
     return ToolResult(
         True,
-        "已把 %d 个字符粘到当前焦点处：%s" % (len(text), text[:40].replace("\n", " ") + ("…" if len(text) > 40 else "")),
+        "已把 %d 个字符粘到当前焦点处：%s%s"
+        % (len(text), text[:40].replace("\n", " ") + ("…" if len(text) > 40 else ""), note),
     )
 
 
@@ -585,6 +792,8 @@ def _click_screen(args: dict, context: dict) -> ToolResult:
         _click_at(x, y, button, times)
     except RuntimeError as error:
         return ToolResult(False, "", error=str(error))
+    # 点一下，焦点就落到被点的地方了（页面、输入框、别的窗口），不再是地址栏
+    context["desktop_fresh_open"] = False
     _log("click_screen", "%s x%d @(%d,%d)" % (button, times, x, y))
     return ToolResult(True, "已在 (%d,%d) %s键点击 %d 次" % (x, y, "左" if button == "left" else "右", times))
 
@@ -862,6 +1071,8 @@ register(Tool(
     description=(
         "按一个组合键，例如 ctrl+l（定位地址栏）、enter、tab、esc、ctrl+t（新标签页）、ctrl+w（关标签）。"
         "一次只按一个组合键，形如 ctrl+shift+t。Alt+F4、Win+R、Win+L 等会关窗口或锁屏的组合被禁止。"
+        "刚用 open_url 打开过页面时按翻页键（pagedown/pageup/home/end/方向键），"
+        "会自动先按一次 esc 把焦点从地址栏还给页面——不这么做这些键会被地址栏吃掉，按了等于没按。"
     ),
     parameters={
         "type": "object",

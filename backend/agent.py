@@ -13,6 +13,7 @@ from llm import ModelConfigError, chat_completion_stream
 from tools import all_schemas, get_tool
 from tools.base import ToolResult
 from tools.command import classify_command
+from tools.desktop import release_desktop_session
 from selfcheck import SelfCheck
 import course as course_lib
 import tools as registered_tools  # noqa: F401
@@ -1167,6 +1168,9 @@ def run_agent_stream(
         yield {"type": "error", "message": reply}
     finally:
         clear_cancel(run_id)
+        # 桌面会话锁必须主动放：否则用户刚跑完一次，90 秒内换个会话再操作，
+        # 会被自己上一次的锁挡在门外，看起来像「莫名其妙用不了」。
+        release_desktop_session(run_id)
 
     if status != "error" and visible_parts:
         reply = "\n\n".join(part for part in visible_parts if part.strip())

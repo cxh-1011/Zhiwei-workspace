@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -44,12 +45,26 @@ def fresh_db():
 
 def invoke(name, args=None, **flags):
     """直接调工具，模拟「绕过 agent 的调用方」。默认给足授权，除非测试显式关掉。"""
+    clear_session()
     context = {"run_id": "test-desktop"}
     context.update(flags)
     context.setdefault("allow_desktop", True)
     tool = tools.get_tool(name)
     assert tool is not None, "工具未注册：%s" % name
     return tool.invoke(args or {}, context)
+
+
+def clear_session():
+    """每个用例从干净状态开始。
+
+    真实使用里会话锁靠「跑完主动释放 + 90 秒超时」管理；测试里各用例用不同的 run_id，
+    不清的话后一个用例会被前一个的锁挡住，测的就不是它本来要测的东西。
+    锁本身的语义由 test_session_lock 验，那里不走这个 helper。
+    """
+    try:
+        os.remove(desktop._lock_path())
+    except OSError:
+        pass
 
 
 # 真正的视觉函数在 stub_backends 之前存一份：那个测试要验的是换算逻辑，
@@ -59,6 +74,9 @@ REAL_ASK_VISION = desktop._ask_vision
 
 def stub_backends():
     """把所有真实动作换成记录器。"""
+    # 截图、动作日志、会话锁全部落到临时目录：跑测试不该往真实的 desktop_shots 里写，
+    # 更不能在那里留下锁文件——那会把用户自己的桌面操作挡在门外。
+    desktop.SHOT_DIR = tempfile.mkdtemp(prefix="desk-shots-")
     desktop._launch_url = lambda url, browser="": (
         CALLS.append(("open_url", url, browser)) or "假浏览器"
     )
@@ -324,6 +342,7 @@ def test_vision_pipeline():
 
 def test_budget():
     print("\n[动作预算]")
+    clear_session()
     context = {"run_id": "budget", "allow_desktop": True}
     tool = tools.get_tool("list_windows")
     for _ in range(desktop.MAX_ACTIONS):
@@ -335,6 +354,87 @@ def test_budget():
     check("超限拒绝", not result.ok, result.content[:40])
     check("超限后计数不再涨", context["desktop_actions"] == desktop.MAX_ACTIONS, context["desktop_actions"])
     check("让模型停下来问人", "让" in (result.error or "") or "接手" in (result.error or ""), result.error)
+
+
+# ---------------------------------------------------------------- 会话锁
+
+def test_session_lock():
+    print("\n[会话锁]")
+    clear_session()
+    tool = tools.get_tool("list_windows")
+    a = {"run_id": "sess-A", "allow_desktop": True}
+    b = {"run_id": "sess-B", "allow_desktop": True}
+
+    check("甲先拿到桌面", tool.invoke({}, a).ok)
+    check("锁文件落盘", os.path.exists(desktop._lock_path()))
+
+    result = tool.invoke({}, b)
+    check("乙被挡住", not result.ok, result.content[:40])
+    check("报错指出是哪个会话", "sess-A" in (result.error or ""), result.error)
+    check("说清后果是会点错", "点错" in (result.error or ""), result.error)
+    check("被挡住不算一次动作", b.get("desktop_actions") in (None, 0), b.get("desktop_actions"))
+    check("甲自己可以连续调用", tool.invoke({}, a).ok)
+
+    # 卡死的会话不能永久占着：超过 SESSION_LEASE 没有动作就当它已经结束
+    data = desktop._read_session()
+    data["ts"] = time.time() - desktop.SESSION_LEASE - 1
+    with open(desktop._lock_path(), "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    check("超时后乙可以接管", tool.invoke({}, b).ok)
+    check("锁换成了乙", desktop._read_session().get("run") == "sess-B", desktop._read_session())
+
+    desktop.release_desktop_session("sess-A")
+    check("甲放不掉乙的锁", os.path.exists(desktop._lock_path()))
+
+    desktop.release_desktop_session("sess-B")
+    check("乙跑完主动放锁", not os.path.exists(desktop._lock_path()))
+    check("放锁后甲立刻可用", tool.invoke({}, a).ok)
+
+
+# ---------------------------------------------------------------- 刚打开页面后的焦点
+
+def test_fresh_open_focus():
+    print("\n[打开页面后的焦点]")
+    clear_session()
+    ctx = {"run_id": "focus-A", "allow_desktop": True}
+
+    CALLS.clear()
+    tools.get_tool("open_url").invoke({"url": "https://example.com"}, ctx)
+    check("打开网址后记下「刚打开过」", ctx.get("desktop_fresh_open") is True, ctx.get("desktop_fresh_open"))
+
+    CALLS.clear()
+    result = tools.get_tool("press_keys").invoke({"keys": "pagedown"}, ctx)
+    check("翻页键前先按 esc", [c[1] for c in CALLS] == ["escape", "pagedown"], CALLS)
+    check("说明为什么多按一下", "地址栏" in result.content, result.content)
+    check("标记已清掉", ctx.get("desktop_fresh_open") is False, ctx.get("desktop_fresh_open"))
+
+    CALLS.clear()
+    tools.get_tool("press_keys").invoke({"keys": "pagedown"}, ctx)
+    check("第二次翻页不再插 esc", [c[1] for c in CALLS] == ["pagedown"], CALLS)
+
+    # ctrl+l 本来就是要进地址栏，不能先 esc 把它踢出去
+    ctx["desktop_fresh_open"] = True
+    CALLS.clear()
+    tools.get_tool("press_keys").invoke({"keys": "ctrl+l"}, ctx)
+    check("ctrl+l 不插 esc", [c[1] for c in CALLS] == ["ctrl+l"], CALLS)
+
+    # 输入同理，而且更隐蔽：文字会粘进地址栏，把刚打开的网址改掉
+    ctx["desktop_fresh_open"] = True
+    CALLS.clear()
+    result = tools.get_tool("type_text").invoke({"text": "天气"}, ctx)
+    check("粘字前先按 esc", [c[1] for c in CALLS] == ["escape", "天气"], CALLS)
+    check("粘字结果里也说明", "地址栏" in result.content, result.content)
+
+    # 点过一下页面，焦点已经明确，不需要再插 esc
+    ctx["desktop_fresh_open"] = True
+    CALLS.clear()
+    tools.get_tool("click_screen").invoke({"x": 400, "y": 300}, ctx)
+    check("点击后标记清掉", ctx.get("desktop_fresh_open") is False, ctx.get("desktop_fresh_open"))
+    CALLS.clear()
+    tools.get_tool("press_keys").invoke({"keys": "home"}, ctx)
+    check("点过之后直接按键", [c[1] for c in CALLS] == ["home"], CALLS)
+
+    desktop.release_desktop_session("focus-A")
 
 
 # ---------------------------------------------------------------- 接进 Agent
@@ -452,6 +552,8 @@ def main_():
     test_vision_math()
     test_vision_pipeline()
     test_budget()
+    test_session_lock()
+    test_fresh_open_focus()
     test_agent_wiring()
     print("\n%s 通过 %d，失败 %d" % ("FAIL" if FAIL else "ALL PASS", PASS, FAIL))
     return 1 if FAIL else 0
