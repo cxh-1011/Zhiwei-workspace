@@ -214,6 +214,10 @@ class Message(BaseModel):
     # 是否允许助手在工作区内执行命令（run_command）。默认关闭，且与「允许改代码」
     # 分开：跑命令比改文件更危险。需要确认的命令会走 /chat/approve 等用户点击。
     allow_command: StrictBool = False
+    # 是否允许助手操作桌面（移动鼠标、敲键盘、截图、打开浏览器）。默认关闭。
+    # 这一项不放进「专家模式」一键全开：会动鼠标的能力必须是界面上单独一处、
+    # 每次会话重新确认的开关，不能跟着别的开关一起被顺手打开。
+    allow_desktop: StrictBool = False
     # 是否请求模型的思考过程（仅部分服务商支持，例如 Qwen3 系列）。默认关闭。
     show_thinking: StrictBool = False
     # 学习模式用：他在哪门课、哪一章。只影响系统提示词里「你现在在哪」这一段，
@@ -379,6 +383,7 @@ def chat(message: Message):
             allow_workspace=message.allow_workspace,
             allow_code_edit=message.allow_code_edit,
             allow_command=message.allow_command,
+            allow_desktop=message.allow_desktop,
             show_thinking=message.show_thinking,
         )
         _persist_chat(message.chat_id, message.text, result)
@@ -415,6 +420,7 @@ def chat_stream(message: Message):
                 allow_workspace=message.allow_workspace,
                 allow_code_edit=message.allow_code_edit,
                 allow_command=message.allow_command,
+                allow_desktop=message.allow_desktop,
                 show_thinking=message.show_thinking,
                 course_id=message.course_id,
                 chapter_id=message.chapter_id,

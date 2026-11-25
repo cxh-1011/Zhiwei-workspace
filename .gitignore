@@ -45,3 +45,6 @@ docs/img/
 docs/*.html
 docs/*.pdf
 docs/*.docx
+
+# 桌面操作截图与动作日志：本机屏幕内容，不进仓库
+desktop_shots/

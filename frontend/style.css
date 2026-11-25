@@ -169,4 +169,6 @@
 .expert-toggle[data-state="partial"] .expert-dot{background:#8b7fd4}
 .expert-note{position:absolute;left:0;bottom:calc(100% + 2px);z-index:6;padding:6px 10px;border:1px solid #f0d5cd;border-radius:8px;background:#fff8f5;color:#a8553c;font-size:9.5px;line-height:1.55;box-shadow:0 6px 18px #20242c12;animation:expertIn .18s ease}
 @keyframes expertIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.desktop-toggle[data-state="on"]{border-color:#f0b8b4;background:#fdeceb;color:#b0342f}
+.desktop-toggle[data-state="on"] .expert-dot{background:#d63b34;box-shadow:0 0 0 3px #d63b3422}
 @media(max-width:600px){.expert-toggle{height:20px;padding:0 7px;font-size:9px}.expert-note{right:0;left:auto}}

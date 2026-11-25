@@ -21,6 +21,10 @@ let allowCodeEdit = false;
 let allowCommand = false;
 // 是否向模型请求思考过程（仅部分模型支持）。开启后回答上方会多出「思考」段落。
 let showThinking = false;
+// 是否允许助手操作桌面（移动鼠标、敲键盘、截图、开浏览器）。默认关闭，且**每次刷新
+// 都要重新打开**——故意不写 localStorage：一个会动鼠标的能力如果被静默恢复，
+// 下次它在你没看着的时候点下去，你连「什么时候开的」都不知道。
+let allowDesktop = false;
 
 // 首次加载聊天列表时，是否已经自动打开过最近一个会话
 let initialLoadDone = false;
@@ -868,7 +872,15 @@ const TOOL_LABELS = {
     write_file: "写入文件",
     edit_file: "修改文件",
     run_command: "运行命令",
-    update_todos: "更新任务清单"
+    update_todos: "更新任务清单",
+    open_url: "打开网页",
+    open_app: "启动应用",
+    list_windows: "查看窗口",
+    focus_window: "切换窗口",
+    press_keys: "按键",
+    type_text: "输入文字",
+    click_screen: "点击屏幕",
+    screenshot: "截屏查看"
 };
 
 function toolLabel(name) {
@@ -907,7 +919,16 @@ const ARG_LABELS = {
     cwd: "目录",
     timeout: "超时",
     items: "清单",
-    scope: "范围"
+    scope: "范围",
+    keys: "按键",
+    text: "文字",
+    question: "问题",
+    app: "应用",
+    keyword: "关键词",
+    browser: "浏览器",
+    times: "次数",
+    x: "横坐标",
+    y: "纵坐标"
 };
 
 function formatArgValue(value) {
@@ -1733,6 +1754,7 @@ async function sendMessage() {
                 allow_workspace: allowWorkspace,
                 allow_code_edit: allowCodeEdit,
                 allow_command: allowCommand,
+                allow_desktop: allowDesktop,
                 show_thinking: showThinking
             },
             event => {
@@ -3065,6 +3087,8 @@ function restoreAllowWrites() {
     // 恢复完再同步按钮：老用户 localStorage 里可能只开过其中一两项，
     // 这时按钮要显示「部分」，不能装作全开，否则他会以为跑命令也开了。
     syncExpertButton();
+    // 桌面控制不参与记忆恢复，这里只是把按钮画成关闭状态
+    syncDesktopButton();
 }
 
 // ---------- 专家模式 ----------
@@ -3103,6 +3127,39 @@ function syncExpertButton() {
     button.setAttribute("aria-pressed", state === "on" ? "true" : "false");
     const label = $("expertLabel");
     if (label) label.textContent = state === "partial" ? "专家模式 · 部分" : "专家模式";
+}
+
+// ---------- 操作桌面 ----------
+// 这一项故意不放进 EXPERT_ITEMS：专家模式是「一键全开」，而桌面控制会真的移动
+// 用户的鼠标、敲他的键盘。混进去的后果是：他点一下「专家模式」就顺手把这件事
+// 也打开了，却完全不知道。所以它单独一个按钮、默认关闭、不写 localStorage、
+// 每次打开都要过一次确认弹窗。
+function syncDesktopButton() {
+    const button = $("desktopToggle");
+    if (!button) return;
+    button.dataset.state = allowDesktop ? "on" : "off";
+    button.setAttribute("aria-pressed", allowDesktop ? "true" : "false");
+    const label = $("desktopLabel");
+    if (label) label.textContent = allowDesktop ? "操作桌面 · 已开" : "操作桌面";
+}
+
+function toggleDesktopMode() {
+    if (allowDesktop) {
+        allowDesktop = false;
+        syncDesktopButton();
+        return;
+    }
+    const accepted = window.confirm(
+        "开启后，助手会真的控制这台电脑：\n" +
+        "· 移动并点击你的鼠标\n" +
+        "· 在你的键盘上打字（通过剪贴板粘贴）\n" +
+        "· 截取整个屏幕（截图存在项目 desktop_shots/ 目录）\n\n" +
+        "建议开启期间看着屏幕，不要同时抢鼠标键盘。\n" +
+        "遇到登录、支付、验证码页面它应当停下来问你。\n\n确认开启？"
+    );
+    if (!accepted) return;
+    allowDesktop = true;
+    syncDesktopButton();
 }
 
 function toggleExpertMode() {

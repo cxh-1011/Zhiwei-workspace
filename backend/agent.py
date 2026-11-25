@@ -108,6 +108,12 @@ WORKSPACE_READ_TOOLS = ("repo_map", "list_dir", "read_file", "grep_code", "git_s
 WORKSPACE_EDIT_TOOLS = ("write_file", "edit_file")
 # 命令执行单独一组：比写文件更危险，必须用户再勾一次「允许跑命令」
 WORKSPACE_COMMAND_TOOLS = ("run_command",)
+
+# 桌面操作（鼠标键盘）单独一组，且**不进专家模式**：专家模式一键全开，
+# 里面放一个「会动你鼠标」的能力，手一滑就开了。它必须是界面上单独一处、
+# 每次会话重新确认的开关。
+DESKTOP_TOOLS = ("open_url", "open_app", "list_windows", "focus_window",
+                 "press_keys", "type_text", "click_screen", "screenshot")
 # 任务清单不碰文件、不执行任何东西，只要开了任何一种工作区能力就注册：
 # 读代码看仓库同样可能是多步任务，用户需要知道它打算做几件事。
 TODO_TOOLS = ("update_todos",)
@@ -479,6 +485,7 @@ def run_agent_stream(
     allow_workspace: bool = False,
     allow_code_edit: bool = False,
     allow_command: bool = False,
+    allow_desktop: bool = False,
     show_thinking: bool = False,
     course_id: str = "",
     chapter_id: str = "",
@@ -496,7 +503,7 @@ def run_agent_stream(
     run_id = uuid.uuid4().hex
     started = time.monotonic()
     # 预算按模式取：改代码与跑命令都要宽得多，否则读改两轮就到顶
-    budget = budget_for(allow_code_edit or allow_command)
+    budget = budget_for(allow_code_edit or allow_command or allow_desktop)
     deadline = started + budget.seconds
     steps: list[dict] = []
     # 记忆检索是只读的，不挂在任何开关下：它只是把库里已有的东西找出来给他看。
@@ -551,10 +558,18 @@ def run_agent_stream(
             name for name in WORKSPACE_COMMAND_TOOLS if name not in tool_names
         ]
 
+    # 桌面操作又单独一道门，不跟上面任何一个开关合并——它会真的移动用户的鼠标。
+    if allow_desktop:
+        tool_names = list(tool_names) + [
+            name for name in DESKTOP_TOOLS if name not in tool_names
+        ]
+
     # run_id 传给工具，写入工具据此把备份落到 backups/agent-edits/<run_id>/
     context = {
         "mode": mode, "filename": filename, "run_id": run_id,
         "allow_code_edit": allow_code_edit, "allow_command": allow_command,
+        # 桌面工具的授权与已用次数：次数放在 context 里，因为上限必须跨工具调用累计
+        "allow_desktop": allow_desktop, "desktop_actions": 0,
         # 用户批准过的命令原文：run_command 内部会再核对一次，防绕过
         "approved_commands": set(),
         # 有一条命令等确认超时后置 True：本次运行不再发起新的确认，
@@ -664,6 +679,24 @@ def run_agent_stream(
             "⑤ 命令超时或退出码非零时，读输出定位问题；改完再跑一次验证，而不是改完就宣布成功；"
             "⑥ 只能声称「命令退出码 0、测试通过」当你真的看到这个结果；没跑过就说没跑过；"
             "⑦ 长驻服务（dev server、watch）不要用 run_command 启动，它会一直占着直到超时。"
+        )
+
+    if allow_desktop:
+        prompt += (
+            "\n\n用户已开启「允许操作桌面」。你有八个工具：open_url、open_app、list_windows、"
+            "focus_window、press_keys、type_text、click_screen、screenshot。规则："
+            "① **先判断能不能不动鼠标**：要打开网站或搜索，直接用 open_url 拼结果页地址，"
+            "不要「先开首页、再点搜索框、再输入」——那三步里两步都可能出错，而 URL 一次到位；"
+            "② 要操作已经开着的程序，顺序固定：list_windows 确认窗口 → focus_window 切到前台 → "
+            "再 type_text / press_keys。键盘事件只发给前台窗口，切不过去就停下来告诉用户，不要盲打；"
+            "③ 只有 open_url 和键盘都做不到（必须点页面里的按钮、必须拖拽）才用 click_screen；"
+            "点之前必须 screenshot(question=...) 拿到真实坐标，不要自己估算，点完再截图确认；"
+            "④ 一次只做一个动作，做完看结果再决定下一步，不要连点几下再回头看；"
+            "⑤ 遇到登录框、支付、验证码、密码输入、系统授权弹窗（UAC）立刻停下交给用户，"
+            "绝不替他输密码、绝不点「允许」或「是」；"
+            "⑥ 收尾时用一两句话说明「做了什么、屏幕现在停在哪个页面」，不要逐步播报计划；"
+            "⑦ 一次对话最多 40 次桌面动作，同一个动作连着两次没效果就停下来问用户；"
+            "⑧ 你不调用 screenshot 就看不到屏幕，不要假设「应该已经打开了」，要截图确认。"
         )
 
     # 模型不知道今天几号，这件事在联网场景下会直接毁掉回答。
@@ -1178,6 +1211,7 @@ def run_agent(
     allow_workspace: bool = False,
     allow_code_edit: bool = False,
     allow_command: bool = False,
+    allow_desktop: bool = False,
     show_thinking: bool = False,
     course_id: str = "",
     chapter_id: str = "",
@@ -1196,6 +1230,7 @@ def run_agent(
         allow_workspace=allow_workspace,
         allow_code_edit=allow_code_edit,
         allow_command=allow_command,
+        allow_desktop=allow_desktop,
         show_thinking=show_thinking,
         course_id=course_id,
         chapter_id=chapter_id,
