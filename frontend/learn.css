@@ -258,6 +258,10 @@ button { cursor: pointer; }
 .next-card.all-done { border-color: #d9ecdf; background: var(--ok-soft); }
 .next-card.all-done small { color: #4a8059; }
 .next-card.all-done b { color: #35694a; }
+/* 兜底推荐：不是「轮到它」，是「别的都跳了，留它压舱」——用虚线边框区分 */
+.next-card.fallback { border-style: dashed; border-color: #d8dcc0; background: #fbfbf2; }
+.next-card.fallback small { color: #837f52; }
+.next-card.fallback b { color: #5b5730; }
 
 /* 中：正文 */
 .reader { flex: 1; min-width: 0; overflow-y: auto; background: #fff; }

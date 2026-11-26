@@ -270,6 +270,9 @@ def decorate(course: dict, course_id: str = DEFAULT_COURSE) -> dict:
         ],
     } if skipped_stages else None
     course["next"] = recommend_next(chapters)
+    # 兜底那条推荐要单独标出来：目录里 33 章都打着「跳过」，推荐却说「下一步是第 33 章」，
+    # 不解释来由就是自相矛盾。前端据此换文案，导师据此换说法。
+    course["next_fallback"] = next_is_fallback(chapters, course["next"])
     return course
 
 
@@ -278,7 +281,8 @@ def recommend_next(chapters: list) -> dict | None:
 
     1. 手上有一章标了 learning 但没 done —— 先把它学完，不要开新的；
     2. 找第一个「前置都满足、自己还没过关」的章节；
-    3. 全部满足返回 None，界面据此提示「主干学完了，去项目库」。
+    3. 全被诊断判了可跳过 —— 留最后一章兜底，别让整门课凭空消失；
+    4. 真的全学完了返回 None，界面据此提示「主干学完了，去项目库」。
 
     「满足」不等于「过关」：诊断判到 2 级的阶段里的章也算满足，
     否则定制路线等于白做——测出地基会了，推荐还是把你拉回第 1 章。
@@ -302,7 +306,28 @@ def recommend_next(chapters: list) -> dict | None:
         if all(p in satisfied for p in prereqs if p in by_id):
             return chapter
 
+    # 一条都没剩，可能是因为真学完了，也可能是因为诊断把整门课都判了可跳过。
+    # 后者不留一章就是「12 分钟的卷子决定这门课对你等于不存在」——代价太大，
+    # 而且这张卷子只能证明「认得」，证明不了「写得出」。所以留最后一章兜底：
+    # 不是因为它没被判跳过，而是因为「一章不动就走」比「少认一个概念」更亏。
+    last = chapters[-1]
+    if last.get("skipped") and not _is_passed(last):
+        return last
+
     return None
+
+
+def next_is_fallback(chapters: list, chapter: dict | None) -> bool:
+    """这一条推荐是不是上面那句兜底给的。
+
+    界面必须能分清：「按依赖顺序轮到它」和「能跳的都跳了，留一章压舱」。
+    两种情况下左边目录都打着「跳过」，文案照旧会自相矛盾。
+    兜底必然落在最后一章且该章带 skipped 标记——正常顺序推荐永远走不到
+    一个 skipped 的章（skipped 且前置满足的，早被 satisfied 滤掉了）。
+    """
+    if not chapters or not chapter:
+        return False
+    return bool(chapter.get("skipped") and chapter["id"] == chapters[-1]["id"])
 
 
 def blocked_by(chapters: list, chapter: dict) -> list:
@@ -358,7 +383,12 @@ def tutor_context(course_id: str, chapter_id: str | None = None) -> str:
         )
 
     nxt = course.get("next")
-    if nxt:
+    if nxt and course.get("next_fallback"):
+        lines.append(
+            "摸底把能跳的都跳了，但建议至少把最后一章第 %d 章《%s》完整走一遍。"
+            % (nxt["no"], nxt["title"])
+        )
+    elif nxt:
         lines.append("按依赖顺序，下一章应该是第 %d 章《%s》。"
                      % (nxt["no"], nxt["title"]))
     return "\n".join(lines)

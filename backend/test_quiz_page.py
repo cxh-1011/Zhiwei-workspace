@@ -220,9 +220,14 @@ def test_skip_routing():
     reset()
     api.post("/diagnostic/submit", json={"answers": full})
     course3 = api.get("/course").json()
-    check("全判 2 级后 next 为空", course3["next"] is None, course3["next"])
+    # 全跳完不许把推荐清空：留最后一章压舱，并且要标明这是兜底而不是「轮到了」。
+    check("全判 2 级后兜底到最后一章",
+          course3["next"] and course3["next"]["id"] == "s10c2", course3["next"])
+    check("兜底标记随接口下发", course3.get("next_fallback") is True,
+          course3.get("next_fallback"))
     check("33 章全标跳过", course3["progress"]["skipped"] == 33, course3["progress"])
     check("仍然一章都没标学完", course3["progress"]["done"] == 0, course3["progress"])
+    check("进度条没被顶起来", course3["progress"]["percent"] == 0, course3["progress"])
 
 
 def test_auth():

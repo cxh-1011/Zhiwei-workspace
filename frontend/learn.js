@@ -249,6 +249,17 @@ function nextCardHtml() {
       <b>可以去做项目了</b>
     </div>`;
   }
+  // 兜底推荐：全被诊断判了可跳过，只留最后一章压舱。
+  // 不能写「按依赖顺序」——左边目录全打着「跳过」，那句话没法自圆。
+  // 也不能说「其它都跳了」：这一章自己也带着跳过标签，留着它是「建议走一遍」，
+  // 不是「它不够格跳」。
+  if (state.course.next_fallback) {
+    return `<div class="next-card fallback">
+      <small>全判了可跳过 · 至少走一遍</small>
+      <b>第 ${next.no} 章 ${escapeHtml(next.title)}</b>
+      <button id="nextGo">去这一章</button>
+    </div>`;
+  }
   return `<div class="next-card">
     <small>按依赖顺序 · 下一步</small>
     <b>第 ${next.no} 章 ${escapeHtml(next.title)}</b>
@@ -292,6 +303,14 @@ async function openChapter(chapterId) {
 function skipGateHtml(c) {
   if (!c || !c.skipped) return '';
   const why = c.skip_evidence ? `（${escapeHtml(c.skip_evidence)}）` : '';
+  // 兜底那一章不许再说「不推荐」：推荐卡片正指着它。
+  const fallback = state.course && state.course.next_fallback
+    && state.course.next && state.course.next.id === c.id;
+  if (fallback) {
+    return `<div class="gate skip">这一段摸底诊断判到 ${c.skip_level} 级${why}，
+      别的章都可以跳，这一章留着当压舱石：诊断只能证明你认得这些概念，
+      证明不了你真能跑通一遍。答错题会自动把它排回推荐。</div>`;
+  }
   return `<div class="gate skip">这一段摸底诊断判到 ${c.skip_level} 级${why}，
     所以不推荐也不拦你。想复习就往下读；这里答错题，会自动把它重新排回推荐。</div>`;
 }

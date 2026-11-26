@@ -216,7 +216,7 @@ def test_blocked_by():
 
 
 def test_all_satisfied():
-    print("\n[全部满足：next 为 None，但进度条不动]")
+    print("\n[全部被判跳过：留最后一章兜底，进度条不动]")
     conn = sqlite3.connect(database.DB_PATH)
     conn.execute("DELETE FROM profile_skills")
     conn.execute("DELETE FROM course_progress")
@@ -226,7 +226,12 @@ def test_all_satisfied():
         "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10")})
 
     decorated = course.decorate(course.load_course(COURSE), COURSE)
-    check("next 为 None", decorated["next"] is None, decorated["next"])
+    nxt = decorated["next"]
+    # 33 章全判了可跳过，但推荐不能变空：12 分钟的卷子证明不了「能写」，
+    # 留最后一章是「至少完整走一遍」，不是「它没被判跳过」。
+    check("next 兜底到最后一章", nxt and nxt["id"] == "s10c2", nxt and nxt["id"])
+    check("兜底被标出来", decorated.get("next_fallback") is True, decorated.get("next_fallback"))
+    check("兜底那章仍带跳过标记", nxt and nxt.get("skipped") is True)
     check("33 章全标跳过", decorated["progress"]["skipped"] == 33,
           decorated["progress"]["skipped"])
     check("done 仍是 0", decorated["progress"]["done"] == 0, decorated["progress"]["done"])
@@ -241,6 +246,38 @@ def test_all_satisfied():
     # 跳过绝不能写进进度表：写了进度条会凭空跳到 100%，而正文一章没读
     progress = database.list_course_progress(COURSE)
     check("跳章不写 course_progress", progress == {}, progress)
+
+
+def test_fallback_retires():
+    print("\n[兜底那章学完：推荐才真的结束]")
+    # 接着上面的画像：33 章全跳过。把最后一章标成学完。
+    database.set_course_progress(COURSE, "s10c2", status="done")
+    decorated = course.decorate(course.load_course(COURSE), COURSE)
+    check("next 变 None", decorated["next"] is None, decorated["next"])
+    check("兜底标记跟着关掉", decorated.get("next_fallback") is False,
+          decorated.get("next_fallback"))
+    check("跳过的章数没变", decorated["progress"]["skipped"] == 33,
+          decorated["progress"]["skipped"])
+
+    # 留一章兜底的前提是「它自己还没过关」；答错题也照样把它排回推荐
+    database.set_course_progress(COURSE, "s10c2", status="todo")
+    decorated = course.decorate(course.load_course(COURSE), COURSE)
+    check("撤回学完又回到兜底", decorated["next"] and decorated["next"]["id"] == "s10c2",
+          decorated["next"] and decorated["next"]["id"])
+
+
+def test_fallback_not_used_halfway():
+    print("\n[只跳了前几段时，不触发兜底]")
+    conn = sqlite3.connect(database.DB_PATH)
+    conn.execute("DELETE FROM profile_skills")
+    conn.execute("DELETE FROM course_progress")
+    conn.commit()
+    conn.close()
+    set_levels({"s1": 2, "s2": 2})
+    decorated = course.decorate(course.load_course(COURSE), COURSE)
+    check("照常推第 7 章", decorated["next"] and decorated["next"]["id"] == "s3c1",
+          decorated["next"] and decorated["next"]["id"])
+    check("没标兜底", not decorated.get("next_fallback"), decorated.get("next_fallback"))
 
 
 def test_out_of_order():
@@ -305,6 +342,8 @@ def main_():
         test_learning_wins()
         test_blocked_by()
         test_all_satisfied()
+        test_fallback_retires()
+        test_fallback_not_used_halfway()
         test_out_of_order()
         test_missing_table()
         test_tutor_mentions_skip()
