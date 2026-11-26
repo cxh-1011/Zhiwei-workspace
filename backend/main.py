@@ -1156,7 +1156,10 @@ def get_course(course_id: str = course_lib.DEFAULT_COURSE):
 def get_course_chapter(chapter_id: str, course_id: str = course_lib.DEFAULT_COURSE):
     try:
         payload = course_lib.load_chapter(course_id, chapter_id)
-        chapters = course_lib.load_course(course_id)["chapters"]
+        # 用 decorate 过的章节：blocked_by 要靠 skipped 标记判断前置是不是被诊断跳过了。
+        # 直接 load_course 拿到的章节没有这个标记，会退化成「只认手点的学完」，
+        # 表现就是刚做完摸底、点开第 20 章还被提示先去补第 3 章。
+        chapters = course_lib.decorate(course_lib.load_course(course_id), course_id)["chapters"]
     except course_lib.CourseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # 他可能直接点开了第 20 章，这里把「还差哪些前置」一起给他，前端画黄条

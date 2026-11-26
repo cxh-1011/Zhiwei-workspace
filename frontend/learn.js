@@ -178,10 +178,15 @@ function renderToc() {
         'chap',
         c.id === state.chapterId ? 'active' : '',
         c.written ? '' : 'locked',
+        c.skipped ? 'skipped' : '',
       ].filter(Boolean).join(' ');
-      return `<button class="${cls}" data-chapter="${c.id}">
+      // 「跳过」这个标签不能省：目录里少了一个推荐，用户会以为是漏了，
+      // 而不是「诊断说这段你会了」。
+      const skipTag = c.skipped ? '<span class="skip-tag">跳过</span>' : '';
+      return `<button class="${cls}" data-chapter="${c.id}"${c.skipped ? ' title="摸底诊断判定这一段可跳过，想学随时点"' : ''}>
         <span class="chap-no">${c.no}</span>
         <span class="chap-title">${escapeHtml(c.title)}</span>
+        ${skipTag}
         ${quizLight(c.quiz)}
         <span class="dot ${c.status}"></span>
       </button>`;
@@ -228,7 +233,17 @@ function diagnosticCardHtml() {
 
 function nextCardHtml() {
   const next = state.course.next;
+  const p = state.course.progress || {};
   if (!next) {
+    const skipped = p.skipped || 0;
+    // 「都跳完了」和「都学完了」是两件事。合并成一句「可以去做项目了」，
+    // 会在用户一章正文都没读的情况下宣布他学完了。
+    if (skipped > 0 && (p.done || 0) < (p.total || 0)) {
+      return `<div class="next-card all-done">
+        <small>没有必须按顺序学的了</small>
+        <b>${skipped} 章按摸底结果跳过，想补哪章点左边就行</b>
+      </div>`;
+    }
     return `<div class="next-card all-done">
       <small>主干已学完</small>
       <b>可以去做项目了</b>
@@ -271,6 +286,28 @@ async function openChapter(chapterId) {
   }
 }
 
+/* 「这一段可以跳过」的提示条。抽成函数是为了能在答题后原地更新：
+   答错会让这一章退出跳过，提示必须跟着消失——否则页面上会同时写着
+   「这段可以跳过」和「下一步就是这一章」，自相矛盾。 */
+function skipGateHtml(c) {
+  if (!c || !c.skipped) return '';
+  const why = c.skip_evidence ? `（${escapeHtml(c.skip_evidence)}）` : '';
+  return `<div class="gate skip">这一段摸底诊断判到 ${c.skip_level} 级${why}，
+    所以不推荐也不拦你。想复习就往下读；这里答错题，会自动把它重新排回推荐。</div>`;
+}
+
+function syncSkipGate() {
+  const host = el('skipGateHost');
+  const fresh = (state.course.chapters || []).find((x) => x.id === state.chapterId);
+  if (!host || !fresh) return;
+  host.innerHTML = skipGateHtml(fresh);
+  if (state.chapter && state.chapter.chapter) {
+    state.chapter.chapter.skipped = fresh.skipped;
+    state.chapter.chapter.skip_level = fresh.skip_level;
+    state.chapter.chapter.skip_evidence = fresh.skip_evidence;
+  }
+}
+
 function renderChapter(payload) {
   const c = payload.chapter;
   const blocked = payload.blocked_by || [];
@@ -279,7 +316,9 @@ function renderChapter(payload) {
         ${blocked.map((b) => `第 ${b.no} 章《${escapeHtml(b.title)}》`).join('、')}。
         现在读也能读，但后面几步会用到它们。</div>`
     : '';
-
+  // 被跳过的章也要说清为什么。不说的话，用户看到目录里有个「跳过」标签、
+  // 又找不到任何解释，会以为是自己误操作点掉的。
+  const skipHtml = skipGateHtml(c);
   const done = c.status === 'done';
 
   el('readerInner').innerHTML = `
@@ -290,6 +329,7 @@ function renderChapter(payload) {
       <span>预计 ${c.minutes || 40} 分钟</span>
     </div>
     ${gateHtml}
+    <div id="skipGateHost">${skipHtml}</div>
     <article class="prose">${renderMarkdown(payload.markdown)}</article>
     ${renderQuiz(payload.quiz)}
     <div class="reader-actions">
@@ -511,7 +551,10 @@ async function submitQuizItem(item, root, button) {
     // 一旦两边口径不同（比如重做把原来的过改成没过），目录灯就会说谎。
     state.chapter.quiz.state = result.quiz;
     syncQuizToCourse(result.quiz, result.mastery);
-    renderToc();
+    // 答错会让这一章退出「诊断跳过」、重新排回推荐，所以必须重拉课程树：
+    // 只就地改灯的话，目录标签和下一步卡片会停在旧结论上，
+    // 表现成「答错了一题，推荐还是绕开这一章」。
+    loadCourse().then(syncSkipGate).catch(() => renderToc());
     updateQuizSummary();
 
     note.textContent = '';
@@ -929,6 +972,18 @@ async function boot() {
   const target = known ? fromHash : (state.course.next && state.course.next.id);
   if (target) openChapter(target);
   else el('readerInner').innerHTML = '<div class="empty-state"><p>这门课还没有章节。</p></div>';
+
+  // 浏览器的前进/后退、以及把 learn.html#s7c2 粘到已打开的页面上，都只会改 hash，
+  // 不重新加载页面。不监听的话这两种操作看起来就是「没反应」。
+  // 两个 self 判断是防回环：openChapter 自己也会写 hash，写了又触发这里。
+  window.addEventListener('hashchange', () => {
+    const want = (location.hash || '').replace('#', '');
+    if (want === 'diagnostic') {
+      if (state.view !== 'diagnostic') openDiagnostic();
+      return;
+    }
+    if (want && want !== state.chapterId) openChapter(want);
+  });
 }
 
 boot();

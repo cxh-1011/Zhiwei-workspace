@@ -733,3 +733,29 @@ button { cursor: pointer; }
   .lv-name { flex-basis: 58px; }
   .lv-val { flex-basis: 62px; }
 }
+
+/* ---------- 诊断跳过：目录标签与章节提示 ---------- */
+
+/* 跳过的章变浅而不是变灰死：它能点、能读、能答题，只是不再被推荐。
+   用灰色会读成「不可用」，和 locked 混淆。 */
+.chap.skipped .chap-title { color: #8d93a0; }
+
+.skip-tag {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  padding: 0 4px;
+  border: 1px solid #e3e6ef;
+  border-radius: 4px;
+  background: #f7f8fb;
+  color: #949aab;
+  font-size: 8.5px;
+  line-height: 14px;
+  letter-spacing: .02em;
+}
+.chap.active .skip-tag { border-color: #cfd5ee; background: #fff; color: #7c86d4; }
+
+.gate.skip {
+  border-color: #dfe4f3;
+  background: #f7f8fd;
+  color: #5c6480;
+}

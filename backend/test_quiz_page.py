@@ -171,6 +171,60 @@ def test_diagnostic_grade():
     check("脏 key 被忽略", dirty["correct"] == 0 and dirty["total"] == 20, dirty["correct"])
 
 
+def test_skip_routing():
+    print("\n[诊断跳章：推荐、目录、前置提示]")
+    reset()
+    api = client()
+    full = correct_answers()
+
+    # 只答第一阶段两题 → s1 判 2 级，其余 0 级
+    only_s1 = {key: value for key, value in full.items() if key in ("d1", "d2")}
+    api.post("/diagnostic/submit", json={"answers": only_s1})
+
+    course = api.get("/course").json()
+    check("s1 三章标跳过", course["progress"]["skipped"] == 3, course["progress"])
+    check("下一个直接是第 4 章", course["next"]["id"] == "s2c1", course["next"]["id"])
+    check("skip 带阶段中文名", course["skip"]["stages"][0]["title"] == "地基",
+          course["skip"]["stages"])
+    check("skip 带判定依据",
+          bool(course["skip"]["stages"][0]["evidence"]), course["skip"]["stages"][0])
+
+    # 进度条不能因为跳过而前进：跳过是「不用学」，不是「学完了」
+    check("percent 仍是 0", course["progress"]["percent"] == 0, course["progress"]["percent"])
+    check("done 仍是 0", course["progress"]["done"] == 0, course["progress"]["done"])
+    check("进度表仍是空的", database.list_course_progress(COURSE) == {})
+
+    # 目录说跳过，点进去必须也说跳过，否则用户以为是两个功能在打架
+    page = api.get("/course/chapter/s1c1").json()
+    check("章节页带跳过标记", page["chapter"]["skipped"] is True,
+          page["chapter"].get("skipped"))
+    check("章节页带跳过等级", page["chapter"]["skip_level"] == 2,
+          page["chapter"].get("skip_level"))
+    check("章节页带判定依据", bool(page["chapter"]["skip_evidence"]),
+          page["chapter"].get("skip_evidence"))
+
+    # 被跳过的前置不该再提示「先学完第 3 章」
+    page2 = api.get("/course/chapter/s2c1").json()
+    check("被跳过的前置不再提示", page2["blocked_by"] == [], page2["blocked_by"])
+
+    # 实测推翻诊断：s1c1 答错一题，就该把它重新排回推荐
+    api.post("/quiz/s1c1/submit", json={"item_id": "s1c1-q1", "answer": "zzz"})
+    course2 = api.get("/course").json()
+    check("答错的章退出跳过", "s1c1" not in course2["skip"]["chapters"],
+          course2["skip"]["chapters"])
+    check("推荐回到第 1 章", course2["next"]["id"] == "s1c1", course2["next"]["id"])
+
+    # 换台设备/重测后全对：全部可跳过，但不能说「学完了」。
+    # 先清掉刚才那条错答——不清的话 s1c1 会一直因为「有题没过」被排除在跳过之外，
+    # 那正是上一条用例在验的行为，不是这里要测的东西。
+    reset()
+    api.post("/diagnostic/submit", json={"answers": full})
+    course3 = api.get("/course").json()
+    check("全判 2 级后 next 为空", course3["next"] is None, course3["next"])
+    check("33 章全标跳过", course3["progress"]["skipped"] == 33, course3["progress"])
+    check("仍然一章都没标学完", course3["progress"]["done"] == 0, course3["progress"])
+
+
 def test_auth():
     print("\n[鉴权]")
     anon = client(authenticated=False)
@@ -182,6 +236,7 @@ def main():
     test_catalog_lights()
     test_diagnostic_paper()
     test_diagnostic_grade()
+    test_skip_routing()
     test_auth()
     print("\n%s 通过 %d，失败 %d" % ("ALL PASS" if not FAIL else "有失败", PASS, FAIL))
     return 0 if not FAIL else 1
