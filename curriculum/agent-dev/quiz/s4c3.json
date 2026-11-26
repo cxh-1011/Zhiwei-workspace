@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s4c3",
+  "source": "第 13 章 给 Agent 上三道锁：token、时间、次数",
+  "items": [
+    {
+      "id": "s4c3-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "response.usage.total_tokens 这个数字统计的是什么？",
+      "options": [
+        "A. 只有模型输出的 token 数",
+        "B. 只有你发过去的输入 token 数",
+        "C. 输入加输出，这次请求实际用掉的 token 总数",
+        "D. 你设置的 max_tokens 上限"
+      ],
+      "answer": "C",
+      "explain": "total_tokens 是这次请求实际消耗的总量，输入和输出都算。所以它大于 max_tokens 很常见——max_tokens 只管输出那一头。做预算和累加计数时必须用 total_tokens，不是拿 max_tokens 当账本。"
+    },
+    {
+      "id": "s4c3-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "timeout=5 限制的不是模型「想多久」，而是整个 HTTP ____ 从发出到收完的耗时。",
+      "blanks": [["请求", "HTTP 请求", "http 请求", "响应"]],
+      "explain": "模型内部想多久你控制不了。timeout 掐的是网络这一侧：连接、排队、首字节、传完，全算在 5 秒里。超时就当这一轮失败，切下一步，而不是继续死等。"
+    },
+    {
+      "id": "s4c3-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "为什么只设了 max_tokens 还是可能把账户刷爆？说清它管不到什么，以及该补哪道锁。",
+      "must": [
+        {
+          "point": "max_tokens 只管单次输出长度",
+          "any": ["单次输出", "输出长度", "一次输出", "只管输出"]
+        },
+        {
+          "point": "管不到调用次数，死循环每次 1 个 token 也能刷",
+          "any": ["调用次数", "次数", "死循环", "循环", "一直调"]
+        },
+        {
+          "point": "要补轮次上限或外部计数器",
+          "any": ["轮次", "max_turns", "计数器", "总 token 上限", "次数上限"]
+        }
+      ],
+      "forbid": ["max_tokens 能限制调用次数", "设了 max_tokens 就不会超支"],
+      "explain": "max_tokens 是「这一口最多吃多少」，不是「一天最多吃几顿」。写个 while True 每次只要 1 个 token，单次都没超，钱照样按秒烧。所以必须再加一道锁：轮次上限（max_turns）或累计 token 计数器，到数就停。"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s7c4",
+  "source": "第 25 章 出问题了怎么查哪一步挂了",
+  "items": [
+    {
+      "id": "s7c4-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "给每次 Agent 调用生成 trace_id，主要解决什么问题？",
+      "options": [
+        "A. 加密日志，防止别人看到内容",
+        "B. 把同一次任务散落在各处的日志串成一趟完整流水，能回放",
+        "C. 提升模型输出质量",
+        "D. 限制循环轮次"
+      ],
+      "answer": "B",
+      "explain": "没有 trace_id，日志就是一堆散装行：你不知道这次报错和上面那几行是不是同一趟任务。生成一个 uuid 从最外层传下去，每步都带上，出问题搜这个 ID 就能按顺序回放整条链路。"
+    },
+    {
+      "id": "s7c4-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "每一步日志至少记四件事：工具名、输入、耗时、以及 ____（success / error / skipped 那种）。",
+      "blanks": [["状态", "status", "结果状态", "执行状态"]],
+      "explain": "只记「调用了什么」不够，还得知道这一步成没成。状态分三类就够：success、error、skipped（比如模型这轮没生成 tool_call，这步压根没发生）。少了状态，日志只能证明「跑过」，证明不了「跑成什么样」。"
+    },
+    {
+      "id": "s7c4-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "日志里只有一行行「Calling model...」，出了故障为什么查不出哪步挂了？该补什么？",
+      "must": [
+        {
+          "point": "缺结构化字段：工具名、输入、耗时、状态",
+          "any": ["结构化字段", "工具名", "耗时", "状态", "字段"]
+        },
+        {
+          "point": "缺 trace_id，无法把一次任务的日志串起来",
+          "any": ["trace_id", "trace id", "串起来", "关联"]
+        },
+        {
+          "point": "状态要能区分 success / error / skipped",
+          "any": ["skipped", "success", "error", "三种状态", "状态区分"]
+        }
+      ],
+      "forbid": ["多打几条文本日志就能定位", "看报错堆栈就够了"],
+      "explain": "「Calling model...」只说明走到了这一步，没说是哪个工具、传了什么、花了多久、成没成。补三样才查得动：结构化字段（能按条件筛）、trace_id（能捞全同一趟）、状态三分类（能看出是失败还是压根没执行）。"
+    }
+  ]
+}

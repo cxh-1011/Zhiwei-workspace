@@ -11,10 +11,12 @@ import os
 import sqlite3
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import database
+import quiz
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _TMP.close()
@@ -174,8 +176,17 @@ def test_bad_requests():
     api = client()
     check("不存在的题号 404", api.post("/quiz/%s/submit" % CHAPTER,
                                    json={"item_id": "s1c1-q9", "answer": "B"}).status_code == 404)
-    check("没题库的章 404", api.post("/quiz/s1c2/submit",
-                                 json={"item_id": "s1c2-q1", "answer": "B"}).status_code == 404)
+    # 33 章现在都有题库，s1c2 不再是「没题库」的样本。
+    # 把题库根指到空目录，才真的在验这条 404 分支。
+    root = quiz.CURRICULUM_ROOT
+    quiz.CURRICULUM_ROOT = Path(tempfile.mkdtemp())
+    quiz._TOTALS_CACHE.clear()
+    try:
+        check("没题库的章 404", api.post("/quiz/s1c2/submit",
+                                     json={"item_id": "s1c2-q1", "answer": "B"}).status_code == 404)
+    finally:
+        quiz.CURRICULUM_ROOT = root
+        quiz._TOTALS_CACHE.clear()
     check("非法章 id 404", api.post("/quiz/A_B/submit",
                                 json={"item_id": "A_B-q1", "answer": "B"}).status_code == 404)
     check("负数秒数 422", api.post("/quiz/%s/submit" % CHAPTER,

@@ -149,7 +149,8 @@ def test_challenged():
     rows = stage_rows(profile.overview(COURSE))
     check("s1 被标 challenged", rows["s1"]["challenged"] is True, rows["s1"])
     check("s1 等级没被改写（画像只记结论）", rows["s1"]["level"] == 2, rows["s1"]["level"])
-    check("覆盖度记了 1 章题库 1 章答过", rows["s1"]["quiz"]["with_quiz"] == 1
+    # s1 这一段三章现在都有题库，所以覆盖是「3 章有题、1 章答过」
+    check("覆盖度记了 3 章题库 1 章答过", rows["s1"]["quiz"]["with_quiz"] == 3
           and rows["s1"]["quiz"]["tested"] == 1, rows["s1"]["quiz"])
     check("没过章节数记 1", rows["s1"]["quiz"]["failed"] == 1, rows["s1"]["quiz"])
     check("s3 没被误伤", rows["s3"]["challenged"] is False, rows["s3"])

@@ -129,12 +129,21 @@ def test_load_chapter():
     second = course.load_chapter("agent-dev", "s1c2")
     check("第 2 章上一章是 s1c1", second["prev"] == "s1c1")
 
-    # 自测答案依赖 details，正文必须保留这两个标签。
-    # 用 s1c2 断言：s1c1 已经有判分题库，它的自测段会被切掉（见下一条）。
-    check("正文保留 details 折叠块", "<details>" in second["markdown"])
+    # 33 章现在都有题库，正文里的 <details> 全部落在「## 自测」段内，会整段切掉。
+    # 但切的范围必须刚好：只切自测，不能把后面的「下一章为什么是它」一起吞掉。
+    check("有题库的章切掉 md 自测", "## 自测" not in second["markdown"])
+    check("切完仍保留下一节", "下一章为什么是它" in second["markdown"])
 
-    # 有题库的章不留 md 版自测：题目就是从那段改写的，留着等于先看答案再答题
-    check("有题库的章切掉 md 自测", "## 自测" not in payload["markdown"])
+    sample = ("正文段落\n\n<details><summary>折叠代码</summary>\ncode\n</details>\n\n"
+              "## 自测\n\n<details><summary>题</summary>答</details>\n\n"
+              "## 下一节\n尾\n")
+    trimmed = course.strip_self_test(sample)
+    check("只切自测段，保留正文折叠块",
+          "<details><summary>折叠代码</summary>" in trimmed, trimmed)
+    check("自测段的折叠块被切掉",
+          "## 自测" not in trimmed and ">题<" not in trimmed, trimmed)
+    check("自测后面的一节还在", "## 下一节" in trimmed, trimmed)
+
     check("有题库的章仍保留其余正文", len(payload["markdown"]) > 500)
 
 

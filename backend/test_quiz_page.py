@@ -12,6 +12,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -78,8 +79,17 @@ def test_catalog_lights():
 
     first = chapter_of(course, "s1c1")
     check("有题库的章带 quiz 摘要", first.get("quiz") == {"total": 3, "answered": 0, "passed": 0}, first.get("quiz"))
-    check("没题库的章是 None", chapter_of(course, "s1c2").get("quiz") is None,
-          chapter_of(course, "s1c2").get("quiz"))
+    # 33 章都有题库了，要验「没题库的章不画灯」，把题库根指到空目录再拉一次目录
+    root = quiz.CURRICULUM_ROOT
+    quiz.CURRICULUM_ROOT = Path(tempfile.mkdtemp())
+    quiz._TOTALS_CACHE.clear()
+    try:
+        bare = client().get("/course").json()
+        check("没题库的章是 None", chapter_of(bare, "s1c2").get("quiz") is None,
+              chapter_of(bare, "s1c2").get("quiz"))
+    finally:
+        quiz.CURRICULUM_ROOT = root
+        quiz._TOTALS_CACHE.clear()
 
     # 答对一道：目录要立刻能反映，否则用户答完回目录看还是灰的
     api = client()

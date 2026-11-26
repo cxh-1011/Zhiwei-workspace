@@ -17,8 +17,19 @@ import quiz
 PASS = 0
 FAIL = 0
 
-# 现在已写题库的章节。补题库时把这个列表加长，测试会自动覆盖新文件。
-WRITTEN = ("s1c1", "s3c1", "s6c2")
+# 33 章全部有题库。新增章节时把 id 加进来，测试会逐章验「3 题、三种题型、自答案判 100」。
+WRITTEN = (
+    "s1c1", "s1c2", "s1c3",
+    "s2c1", "s2c2", "s2c3",
+    "s3c1", "s3c2", "s3c3", "s3c4",
+    "s4c1", "s4c2", "s4c3", "s4c4",
+    "s5c1", "s5c2", "s5c3",
+    "s6c1", "s6c2", "s6c3", "s6c4",
+    "s7c1", "s7c2", "s7c3", "s7c4",
+    "s8c1", "s8c2", "s8c3",
+    "s9c1", "s9c2", "s9c3",
+    "s10c1", "s10c2",
+)
 
 
 def check(name, condition, detail=""):
@@ -252,8 +263,10 @@ def test_loader_guards():
             check("非法章 id 被拒：%r" % bad, False, "居然没抛错")
         except quiz.QuizError:
             check("非法章 id 被拒：%r" % bad, True)
+    # 用一个「格式合法但课程里不存在」的章 id：33 章现在都有题库了，
+    # 拿真实章 id 当缺题样本，补完题库那天这条就会莫名其妙红掉
     check("题库缺失时返回空题而不是抛错",
-          quiz.load_quiz("s10c2")["items"] == [])
+          quiz.load_quiz("s99c9")["items"] == [])
 
 
 def main_():

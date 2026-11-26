@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s1c2",
+  "source": "第 2 章 你发给模型的每条指令都算数",
+  "items": [
+    {
+      "id": "s1c2-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "同一段 user 内容，只想让输出「确定变短」，改哪一处最直接？",
+      "options": [
+        "A. 把 max_tokens 从 200 改成 50",
+        "B. 把 temperature 从 0.8 改成 0.0",
+        "C. 删掉 system 消息",
+        "D. 在 user 后面补一句「请详细说明」"
+      ],
+      "answer": "A",
+      "explain": "max_tokens 卡的是「最多生成多少个 token」，写到上限就被掐断，所以一定变短。temperature 调低只是让它更确定，不保证更短；删掉 system 反而少了约束，常常变长；D 是明确要求变长。"
+    },
+    {
+      "id": "s1c2-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "在模型眼里，system 消息和 user 消息没有身份区别，拼在一起都是同一串 ____（填「上文」或「token」）。",
+      "blanks": [["上文", "上下文", "token 序列", "token序列"]],
+      "explain": "它不区分谁说的、哪句更重要，只认 token 序列。所以删掉 system 不是「去掉一个角色」，而是把开头那段约束从上下文里抽走，续写的起点跟着变了。"
+    },
+    {
+      "id": "s1c2-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "temperature=0 时，同一组 messages 反复请求，结果几乎一字不差。用两三句话说清为什么。",
+      "must": [
+        {
+          "point": "每一步都选概率最高的 token",
+          "any": ["概率最高", "最高的那个", "top-1", "top1", "选最高", "最可能"]
+        },
+        {
+          "point": "没有随机采样环节",
+          "any": ["没有随机", "不随机", "没有采样", "不采样", "不掷骰子", "确定性"]
+        },
+        {
+          "point": "输入完全相同，起点就相同",
+          "any": ["输入相同", "同样的输入", "输入没变", "起点相同", "完全相同的输入"]
+        }
+      ],
+      "forbid": ["模型记住了上次的答案", "它缓存了结果", "有记忆"],
+      "explain": "temperature 是在挑 token 时用的：为 0 就永远取概率最高的那个，中间没有掷骰子这一步。给定完全相同的 messages，每一步的概率分布都一样，选出来的 token 自然一样，于是整段输出稳定复现。"
+    }
+  ]
+}

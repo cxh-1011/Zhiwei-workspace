@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s8c1",
+  "source": "第 26 章 从失败记录里攒测试题",
+  "items": [
+    {
+      "id": "s8c1-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "从失败日志里抽一道测试题，最少要凑齐哪三样东西？",
+      "options": [
+        "A. 时间戳、日志级别、模块名",
+        "B. 输入、它实际吐出的错答案、错在哪",
+        "C. 用户 id、会话 id、模型名",
+        "D. token 数、耗时、费用"
+      ],
+      "answer": "B",
+      "explain": "测试题要能复现和断言：输入是什么、它实际输出了什么、为什么算错（人话原因）。时间戳、用户 id、token 数这些是运维信息，能帮你找到日志，但凑不出题干。"
+    },
+    {
+      "id": "s8c1-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "一条日志能当测试题的前提是「可复现」：把 input 塞回现在的 Agent，它必须稳定输出那个 ____。",
+      "blanks": [["错答案", "错误输出", "同样的错", "错的输出"]],
+      "explain": "有时对有时错，说明这是稳定性问题，不是一条能断言的测试题——先跳过。真正能用的题是：同样的输入喂进去，它每次都稳定地错在同一个地方，改完代码后也能稳定地不再错。"
+    },
+    {
+      "id": "s8c1-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "往 test_cases.json 里加一道题，什么样的题才算合格？说清 input、expected_output、actual_output 各有什么要求。",
+      "must": [
+        {
+          "point": "input 和 actual_output 必须是真实原文，不能改写",
+          "any": ["真实原文", "原文", "完全一致", "不能改写", "照抄"]
+        },
+        {
+          "point": "expected_output 必须是确定的字符串，不能写成「一段清晰的摘要」这种描述",
+          "any": ["确定字符串", "确定的字符串", "不能是描述", "具体字符串", "可断言"]
+        },
+        {
+          "point": "failure_reason 要写人话原因，不是报错堆栈",
+          "any": ["人话原因", "人话", "为什么错", "不是报错", "不是堆栈"]
+        }
+      ],
+      "forbid": ["expected_output 可以写成一句描述", "报错信息就是 failure_reason"],
+      "explain": "测试题的价值在于能自动化断言，所以三样都得是硬内容：input 和 actual_output 照抄日志，改一个字就不是同一道题；expected_output 必须是能逐字比对的结果；failure_reason 写「用了 Python 2 里不存在的 reversed」，而不是把 NameError 抄过来。"
+    }
+  ]
+}

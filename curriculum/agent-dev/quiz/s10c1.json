@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s10c1",
+  "source": "第 32 章 算清楚每句话花多少钱",
+  "items": [
+    {
+      "id": "s10c1-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "用 openai>=1.0 打印一次请求的输入、输出 token 数，字段名是哪个？",
+      "options": [
+        "A. response.usage.prompt_tokens 和 response.usage.completion_tokens",
+        "B. response.usage.input_tokens 和 response.usage.output_tokens",
+        "C. response.usage.total_tokens 和 response.usage.max_tokens",
+        "D. response.tokens.in 和 response.tokens.out"
+      ],
+      "answer": "A",
+      "explain": "这个 SDK 的 CompletionUsage 用的是 prompt_tokens（输入）和 completion_tokens（输出），total_tokens 是两者之和。写成 input_tokens 会直接 AttributeError——名字看着合理，但接口不认。"
+    },
+    {
+      "id": "s10c1-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "总花费 = 输入 token 数 × 输入单价 + 输出 token 数 × ____ 单价（两个字）。",
+      "blanks": [["输出", "输出 token", "输出token", "生成"]],
+      "explain": "输入和输出是分开计价的，通常输出更贵。只拿 total_tokens 乘一个单价，算出来的数一定和账单对不上；要分别乘、再相加，才能还原真实花费。"
+    },
+    {
+      "id": "s10c1-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "比较两个模型跑同一个任务谁更便宜，要注意哪几点？只比「每百万 token 单价」够不够？",
+      "must": [
+        {
+          "point": "不同模型的 tokenizer 不同，同一段话切出的 token 数不同",
+          "any": ["tokenizer 不同", "tokenizer", "切分方式", "token 数不同"]
+        },
+        {
+          "point": "输入和输出要分别按各自单价算",
+          "any": ["单价不同", "分别计价", "输入和输出分别", "输出更贵"]
+        },
+        {
+          "point": "要用同一段真实文本各跑一遍再比",
+          "any": ["同一段文本", "真实文本", "各跑一遍", "同一任务"]
+        }
+      ],
+      "forbid": ["只比单价就够了", "token 数两边一定一样"],
+      "explain": "只比单价不够，因为计价基础都不一样：同一段话在两家 tokenizer 下切出的 token 数可能差一截，输入和输出的单价也各算各的。正确做法是拿同一段真实文本分别跑，各自统计 prompt/completion token，再套各自价表算总账。"
+    }
+  ]
+}

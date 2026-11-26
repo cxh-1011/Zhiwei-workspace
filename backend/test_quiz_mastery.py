@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -181,11 +182,20 @@ def test_manual_done_cap():
 def test_chapter_without_quiz():
     print("\n[没有题库的章]")
     reset_db()
-    state = quiz.chapter_state(EMPTY)
-    check("题目数为 0", state["total"] == 0, state["total"])
-    check("推不出掌握度", quiz.mastery_target(state) is None)
-    check("手点学完给 1 级", quiz.manual_done_mastery(EMPTY) == 1)
-    check("不改库里的掌握度", quiz.apply_mastery(EMPTY, state)["changed"] is False)
+    # 33 章现在都有题库，拿真实章 id 当「没题库」的样本已经不成立了。
+    # 把题库根指到一个空目录，才是真的在验这条分支。
+    root = quiz.CURRICULUM_ROOT
+    quiz.CURRICULUM_ROOT = Path(tempfile.mkdtemp())
+    quiz._TOTALS_CACHE.clear()
+    try:
+        state = quiz.chapter_state(EMPTY)
+        check("题目数为 0", state["total"] == 0, state["total"])
+        check("推不出掌握度", quiz.mastery_target(state) is None)
+        check("手点学完给 1 级", quiz.manual_done_mastery(EMPTY) == 1)
+        check("不改库里的掌握度", quiz.apply_mastery(EMPTY, state)["changed"] is False)
+    finally:
+        quiz.CURRICULUM_ROOT = root
+        quiz._TOTALS_CACHE.clear()
 
 
 def test_cross_course_isolation():

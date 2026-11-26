@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s7c1",
+  "source": "第 22 章 让回答一出来就显示",
+  "items": [
+    {
+      "id": "s7c1-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "用 OpenAI SDK 开流式输出，正确的写法是哪种？",
+      "options": [
+        "A. create(..., stream=True)，然后 for chunk in stream 取 delta.content",
+        "B. create(..., stream=False)，然后 for chunk in response 遍历",
+        "C. create(..., stream=True)，但 response 仍然一次性返回完整文本",
+        "D. 必须改用 WebSocket 才能逐字返回"
+      ],
+      "answer": "A",
+      "explain": "stream=True 时返回的是一个可迭代的流对象，每一包是 chunk，新内容在 chunk.choices[0].delta.content 里。stream=False 返回的是单个 ChatCompletion，不能 for 遍历；流式走的是 HTTP 分块传输，不需要 WebSocket。"
+    },
+    {
+      "id": "s7c1-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "遍历流时，delta.content 可能是 ____，说明这一包只带了 finish_reason 或 usage，没有新内容。",
+      "blanks": [["None", "none", "空", "null"]],
+      "explain": "不是每一包都有正文：最后一包常常只带结束原因，有时还会单独发一条 usage。直接拿去拼接或打印就会炸，所以循环里第一件事是先判空，再决定要不要 append。"
+    },
+    {
+      "id": "s7c1-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "在网页上做逐字打印，除了把每段拼起来，还有哪两件事不能漏？说清漏了会怎样。",
+      "must": [
+        {
+          "point": "要判 delta.content 是否为 None 再拼接",
+          "any": ["None", "判空", "为空", "跳过"]
+        },
+        {
+          "point": "要有缓冲区保存已收到的内容，最后才是完整回答",
+          "any": ["缓冲区", "拼接", "累积", "完整回答", "拼起来"]
+        },
+        {
+          "point": "终端要 flush，网页要及时更新 DOM，否则会一起蹦出来",
+          "any": ["flush", "刷新", "DOM", "一起蹦出来", "一次性出现"]
+        }
+      ],
+      "forbid": ["每个 token 都直接覆盖上一次的内容", "不用缓冲区也能拼出完整回答"],
+      "explain": "逐字打印不是「收到就丢」，而是「收到就追加」：一个字符串累积所有非空片段，最后拿它当完整答案；终端不 flush、网页不更新 DOM，用户看到的还是一坨一起出现。三件事少一件，效果就退回非流式。"
+    }
+  ]
+}

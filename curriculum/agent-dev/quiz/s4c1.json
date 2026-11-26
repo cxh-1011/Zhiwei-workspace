@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s4c1",
+  "source": "第 11 章 ReAct 循环：想-做-看三步走",
+  "items": [
+    {
+      "id": "s4c1-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "ReAct 让模型「分步呼吸」，靠的是哪一种约束？",
+      "options": [
+        "A. 换一个专门支持工具调用的模型",
+        "B. 在 prompt 里强制它按 Thought / Action / Action Input / Observation 的格式输出",
+        "C. 用 JSON Schema 锁住返回结构",
+        "D. 把 temperature 调到 0.7 让它自由发挥"
+      ],
+      "answer": "B",
+      "explain": "ReAct 是格式，不是魔法：它不换模型，只靠 prompt 规定输出骨架。有了这个骨架，你才知道它下一步一定写 Action，才能解析、执行、把 Observation 塞回去。C 是另一个问题（锁 JSON），D 恰恰会破坏格式。"
+    },
+    {
+      "id": "s4c1-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "parse_react 收到一段只有 Action、没有 Action Input 的文本，action_input 应该返回 ____，而不是空字符串（填 Python 里的空值）。",
+      "blanks": [["None", "none", "空值"]],
+      "explain": "「字段缺失」和「字段存在但内容为空」是两件事：前者返回 None，后者返回 \"\"。混成一个值，后面就没法区分「它没给参数」和「它给了一个空参数」，排查时会白走很多弯路。"
+    },
+    {
+      "id": "s4c1-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "跑一次 ReAct 循环，Observation 由谁提供？为什么不能让模型自己写这一段？",
+      "must": [
+        {
+          "point": "由你的代码在真正执行工具之后提供",
+          "any": ["代码", "你的程序", "执行之后", "执行完", "我塞进去"]
+        },
+        {
+          "point": "模型只负责写 Action 和参数",
+          "any": ["Action", "动作", "调用请求", "参数"]
+        },
+        {
+          "point": "让它自己写 Observation 就退回瞎猜",
+          "any": ["瞎猜", "编造", "幻觉", "又变成猜", "自己编"]
+        }
+      ],
+      "forbid": ["模型可以自己生成 Observation", "Observation 由模型生成"],
+      "explain": "ReAct 的分工是：模型想（Thought）和说要做什么（Action），你负责真做（调 API、读文件），再把真实结果（Observation）拼回 prompt。模型从不生成 Observation——一旦让它自己写，它就又回到「没查到也能编一个」的老路，循环再整齐也没意义。"
+    }
+  ]
+}

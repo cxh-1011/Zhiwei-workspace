@@ -1,0 +1,53 @@
+{
+  "chapter_id": "s3c3",
+  "source": "第 9 章 工具报错后让它自己改",
+  "items": [
+    {
+      "id": "s3c3-q1",
+      "kind": "choice",
+      "objective": 0,
+      "level": 1,
+      "stem": "工具抛了异常，想让模型自己修正，下面哪种处理是对的？",
+      "options": [
+        "A. print 出错误，然后把原样的 messages 再发一次",
+        "B. 把错误信息作为 role=tool、带 tool_call_id 的消息塞回 messages，再请求",
+        "C. 在提示词里补一句「记得传 unit」，不传错误本身",
+        "D. 在代码里给缺的参数补个默认值，直接继续"
+      ],
+      "answer": "B",
+      "explain": "模型没有状态，它只能看到 messages 列表。错误不变成一条 tool 消息塞回去，它就真的「看不见」刚才发生了什么。print 只是给你看的，C 是猜原因，D 是把错误藏起来——三种都不会让它学会改参数。"
+    },
+    {
+      "id": "s3c3-q2",
+      "kind": "blank",
+      "objective": 1,
+      "level": 1,
+      "stem": "把错误塞回对话时，那条消息的 role 必须是 ____，并且要带上对应的 tool_call_id。",
+      "blanks": [["tool", "工具", "tool 消息", "工具消息"]],
+      "explain": "OpenAI 的 tools 接口靠 assistant（带 tool_calls）→ tool（带 tool_call_id）这一对来对应「谁调的、结果是什么」。缺了 tool_call_id，模型不知道这条错误属于哪次调用，等于没喂。"
+    },
+    {
+      "id": "s3c3-q3",
+      "kind": "rubric",
+      "objective": 2,
+      "level": 2,
+      "stem": "模型拿到报错后第二次输出了新的 arguments，你怎么确认这次真的合法？说清验证方式，以及不合法时怎么办。",
+      "must": [
+        {
+          "point": "用 json.loads 真解析一遍",
+          "any": ["json.loads", "解析", "loads"]
+        },
+        {
+          "point": "不能只看字段在不在、或字符串里有没有某个词",
+          "any": ["不只看", "不能只看", "字符串包含", "in 判断", "if unit in"]
+        },
+        {
+          "point": "解析失败就再喂一次错误或直接报错退出",
+          "any": ["继续重试", "再试", "重试", "报错退出", "抛错"]
+        }
+      ],
+      "forbid": ["看着像 JSON 就算合法", "不用解析也能确认"],
+      "explain": "合法 ≠ 看着像。第二次输出可能带中文引号、多余逗号、省略号，肉眼很像但 json.loads 会当场抛错。所以验证只有一条路：真解析一遍，解析过了再取字段；解析不过就把新的错误继续塞回去，或者到上限后报错退出。"
+    }
+  ]
+}
