@@ -11,6 +11,7 @@ import os
 import time
 import logging
 import re
+from datetime import date
 
 
 # ======================
@@ -35,6 +36,7 @@ from llm import ModelConfigError, chat_completion, test_connection
 import course as course_lib
 import quiz as quiz_lib
 import profile as profile_lib
+import schedule as schedule_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -55,6 +57,7 @@ from database import (
     delete_learning_plan, get_learning_plan, add_learning_tasks, list_learning_tasks,
     set_learning_task_status, delete_learning_task, replace_unfinished_learning_tasks,
     list_course_progress, set_course_progress, add_course_question, list_course_questions,
+    get_plan_settings, save_plan_settings, list_plan_slots, replace_plan_slots, delete_plan,
 )
 
 
@@ -1304,6 +1307,194 @@ def submit_diagnostic(
         **result,
         "review": quiz_lib.diagnostic_review(diagnostic, mapped),
     }
+
+
+# ---------- 学习排期 ----------
+# 排期是「接下来每天学什么」的完整方案，不是流水账：整份重建、整份替换。
+# 这里只做搬运和组装，算术全在 schedule.py——日期和分钟必须能被测试逐条验，
+# 放进接口里就没人测得动了。
+
+
+class PlanBuildRequest(BaseModel):
+    start_date: str | None = Field(None, max_length=10)
+    # "1,2,3,4,5" 或 "1 2 3"，1=周一。前端用勾选框拼这个串。
+    weekdays: str | None = Field(None, max_length=32)
+    minutes: int | None = Field(None, ge=10, le=480)
+    include_skipped: bool = False
+    # 模型只给「先动哪几章」的顺序，不给日期、不给分钟。默认关：
+    # 没配模型时点一下要等超时，比不给这个按钮更糟。
+    use_model: bool = False
+    note: str = Field("", max_length=2000)
+
+
+class PlanRescheduleRequest(BaseModel):
+    strategy: str = Field("shift", max_length=16)
+
+
+def _plan_payload(course, settings_row, slots):
+    """把课程、设置、槽位拼成前端要的形状。槽位里带上章节信息，
+    前端不必再拿着一堆 id 去课程树里翻。"""
+    today = date.today()
+    chapters = course.get("chapters") or []
+    chapter_map = {c["id"]: c for c in chapters}
+    progress = {c["id"]: {"status": c.get("status")} for c in chapters}
+    settings = schedule_lib.normalize_settings(settings_row, today)
+
+    items, groups = [], {}
+    for slot in slots:
+        chapter = chapter_map.get(slot["chapter_id"])
+        # 课程改版后章可能没了。跳过而不是画一个点不开的空槽——
+        # 那种槽用户点进去只会看到 404。
+        if not chapter:
+            continue
+        day = schedule_lib.parse_day(slot["day"])
+        if not day:
+            continue
+        done = chapter.get("status") == "done"
+        item = {
+            "id": slot.get("id"),
+            "day": slot["day"],
+            "weekday": schedule_lib.weekday_label(day),
+            "seq": slot.get("seq") or 0,
+            "chapter_id": chapter["id"],
+            "no": chapter.get("no"),
+            "title": chapter.get("title") or "",
+            "stage_title": chapter.get("stage_title") or "",
+            "minutes": int(slot.get("minutes") or 0),
+            "done": done,
+            "overdue": day < today and not done,
+        }
+        items.append(item)
+        group = groups.setdefault(slot["day"], {
+            "day": slot["day"],
+            "weekday": item["weekday"],
+            "is_today": day == today,
+            "is_past": day < today,
+            "minutes": 0,
+            "done": 0,
+            "items": [],
+        })
+        group["minutes"] += item["minutes"]
+        group["done"] += 1 if done else 0
+        group["items"].append(item)
+
+    stats = schedule_lib.summarize(items, progress, today)
+    current_sig = schedule_lib.signature(course, settings["include_skipped"])
+    return {
+        "planned": bool(settings_row) and bool(items),
+        "today": today.isoformat(),
+        "settings": settings,
+        "slots": items,
+        "days": sorted(groups.values(), key=lambda g: g["day"]),
+        "stats": stats,
+        # 画像变了但没重排：页面上会出现「这张表排 33 章、画像说只学 23 章」的
+        # 自相矛盾。只提示，不自动重排——自动改日子等于替用户决定哪天学什么。
+        "stale": bool(settings_row) and bool(items)
+        and (settings_row.get("basis_sig") or "") != current_sig,
+        # basis 不依赖槽位：还没排期时也要能说清「画像帮你省掉几章」，
+        # 否则用户不知道为什么这门课忽然只剩 23 章。
+        "basis": schedule_lib.basis(course, settings["include_skipped"]),
+        "next": course.get("next"),
+        "skip": course.get("skip"),
+    }
+
+
+@app.get("/plan")
+def get_plan(course_id: str = course_lib.DEFAULT_COURSE):
+    try:
+        course = course_lib.decorate(course_lib.load_course(course_id), course_id)
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _plan_payload(course, get_plan_settings(course_id), list_plan_slots(course_id))
+
+
+@app.post("/plan/build")
+def build_plan(data: PlanBuildRequest, course_id: str = course_lib.DEFAULT_COURSE):
+    """按当前画像重排整门课。
+
+    没传的参数沿用上次设置——用户只想改「每天 60 分钟」，不该被迫重填开始日。
+    没排过时用默认值（今天开始、每天 90 分钟、每天都学）。
+    """
+    try:
+        course = course_lib.decorate(course_lib.load_course(course_id), course_id)
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    existing = get_plan_settings(course_id) or {}
+    settings = {
+        "start_date": data.start_date or existing.get("start_date"),
+        "weekdays": data.weekdays or existing.get("weekdays"),
+        "minutes": data.minutes or existing.get("minutes"),
+        "include_skipped": data.include_skipped,
+        "catch_up": existing.get("catch_up") or "shift",
+    }
+
+    order, source, reason = [], "default", ""
+    if data.use_model:
+        try:
+            picked = schedule_lib.model_order(
+                schedule_lib.classify(course, settings["include_skipped"])["learnable"],
+                data.note,
+            )
+        except Exception as exc:  # model_order 自己会兜，这里再兜一层，排期不能因模型挂掉
+            logger.warning("模型排期不可用：%s", exc)
+            picked = {"ok": False, "order": [], "reason": str(exc)}
+        if picked.get("ok"):
+            order, source, reason = picked["order"], "model", picked.get("reason") or ""
+        else:
+            reason = picked.get("reason") or "模型不可用，按课程顺序排"
+
+    try:
+        result = schedule_lib.build(course, settings, order=order)
+    except schedule_lib.PlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    normalized = result["settings"]
+    save_plan_settings(
+        course_id, normalized["start_date"],
+        ",".join(str(d) for d in normalized["weekdays"]),
+        normalized["minutes"], normalized["include_skipped"], normalized["catch_up"],
+        schedule_lib.signature(course, normalized["include_skipped"]),
+    )
+    saved = replace_plan_slots(course_id, result["slots"])
+    payload = _plan_payload(course, get_plan_settings(course_id), saved)
+    payload["order_source"] = source
+    payload["order_reason"] = reason
+    return payload
+
+
+@app.post("/plan/reschedule")
+def reschedule_plan(data: PlanRescheduleRequest, course_id: str = course_lib.DEFAULT_COURSE):
+    """掉队之后重排。三种策略见 schedule.reschedule——它们对「没学完的章」
+    态度不同，不能合成一个自动判断。"""
+    existing = get_plan_settings(course_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="还没有排期，先排一次再谈掉队。")
+    try:
+        course = course_lib.decorate(course_lib.load_course(course_id), course_id)
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        result = schedule_lib.reschedule(
+            course, list_plan_slots(course_id), existing, data.strategy,
+        )
+    except schedule_lib.PlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    saved = replace_plan_slots(course_id, result["slots"])
+    payload = _plan_payload(course, existing, saved)
+    payload["strategy"] = data.strategy
+    payload["capacity"] = result["capacity"]
+    payload["dropped"] = result["dropped"]
+    return payload
+
+
+@app.delete("/plan")
+def clear_plan(course_id: str = course_lib.DEFAULT_COURSE):
+    """清空排期。只删计划和设置，不动任何学习记录——用户说「别给我排了」，
+    不等于要把已经学完的章也忘掉。"""
+    delete_plan(course_id)
+    return {"message": "排期已清空。"}
 
 
 if os.path.isdir(FRONTEND_DIR):

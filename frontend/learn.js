@@ -8,10 +8,12 @@ const state = {
   chapter: null,
   chatId: null,
   sending: false,
-  // 'chapter' | 'diagnostic'：诊断页没有章节，靠这个区分，别用 chapterId 空着来判断
+  // 'chapter' | 'diagnostic' | 'profile' | 'plan'：非章节视图没有 chapterId，
+  // 靠这个区分，别用 chapterId 空着来判断
   view: 'chapter',
   diagInfo: null,
   diagResult: null,
+  plan: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -150,6 +152,13 @@ async function loadCourse() {
   } catch (error) {
     state.diagInfo = null;
   }
+  // 排期卡要显示「今天几章、什么时候收尾」。拿不到就不画卡，
+  // 排期接口坏了不该让整页打不开。
+  try {
+    state.plan = await api('/plan');
+  } catch (error) {
+    state.plan = null;
+  }
   renderProgress();
   renderToc();
   renderTocFoot();
@@ -274,14 +283,43 @@ function nextCardHtml() {
   </div>`;
 }
 
+function planCardHtml() {
+  const plan = state.plan;
+  if (!plan) return '';
+  const basis = plan.basis || {};
+  const stats = plan.stats || {};
+  if (!plan.planned) {
+    const saved = basis.saved_minutes
+      ? `画像已省掉 ${basis.skipped} 章（${hours(basis.saved_minutes)}）`
+      : '按每天能投入的时间排到具体日期';
+    return `<div class="plan-card">
+      <small>学习排期 · ${basis.learnable || 0} 章待学 · ${hours(basis.minutes || 0)}</small>
+      <b>${escapeHtml(saved)}</b>
+      <button id="planGo">排一份</button>
+    </div>`;
+  }
+  const todayGroup = (plan.days || []).find((g) => g.is_today);
+  // 只数还没学完的：今天两章学完一章后，卡片还写「今天 2 章」就是在催一件已经做完的事
+  const count = todayGroup ? todayGroup.items.filter((item) => !item.done).length : 0;
+  const left = stats.left || 0;
+  const end = stats.end ? shortDay(stats.end) : '';
+  return `<div class="plan-card ready">
+    <small>学习排期 · ${end ? `预计 ${end} 收尾` : `${left} 章待学`}</small>
+    <b>${count ? `今天 ${count} 章 · 还剩 ${left} 章` : `今天没有安排 · 还剩 ${left} 章`}</b>
+    <button id="planGo">查看排期</button>
+  </div>`;
+}
+
 function renderTocFoot() {
-  el('tocFoot').innerHTML = diagnosticCardHtml() + nextCardHtml();
+  el('tocFoot').innerHTML = diagnosticCardHtml() + nextCardHtml() + planCardHtml();
   const diagGo = el('diagGo');
   if (diagGo) diagGo.addEventListener('click', openDiagnostic);
   const diagProfile = el('diagProfile');
   if (diagProfile) diagProfile.addEventListener('click', openProfile);
   const nextGo = el('nextGo');
   if (nextGo) nextGo.addEventListener('click', () => state.course.next && openChapter(state.course.next.id));
+  const planGo = el('planGo');
+  if (planGo) planGo.addEventListener('click', openPlan);
 }
 
 /* ---------------- 章节正文 ---------------- */
@@ -408,6 +446,8 @@ async function toggleDone(chapter) {
     el('doneHint').textContent = target === 'done'
       ? `已记录（掌握度 ${result.progress.mastery}/3，做完自测题才够 2）`
       : '已撤销';
+    // 排期卡的「今天几章」跟着学习记录走，不然刚点完学完，卡片还说他今天有这章
+    await refreshPlanCard();
   } catch (error) {
     button.disabled = false;
     el('doneHint').textContent = error.message;
@@ -700,7 +740,9 @@ async function submitDiagnostic() {
     state.diagResult = result;
     // 卡片上的「上次答对 X/Y」跟着立刻更新，不用等刷新
     state.diagInfo = { ...(state.diagInfo || {}), last: { correct: result.correct, total: result.total } };
-    renderTocFoot();
+    // 画像变了：目录的「跳过」标签、排期的依据都跟着变。不重拉课程树的话，
+    // 交完卷回到课程，目录还是老样子，用户会以为诊断没生效。
+    await loadCourse();
     renderDiagnosticResult(result);
   } catch (error) {
     hint.textContent = error.message;
@@ -866,6 +908,288 @@ function renderProfile(data) {
   el('reader').scrollTop = 0;
   el('pfAgain').addEventListener('click', openDiagnostic);
   el('pfBack').addEventListener('click', backToCourse);
+}
+
+/* ---------------- 学习排期 ---------------- */
+
+function hours(minutes) {
+  const value = Number(minutes || 0) / 60;
+  if (!value) return '0 小时';
+  return value >= 10 ? `${Math.round(value)} 小时` : `${value.toFixed(1)} 小时`;
+}
+
+function shortDay(iso) {
+  const parts = String(iso || '').split('-');
+  return parts.length === 3 ? `${Number(parts[1])}/${Number(parts[2])}` : String(iso || '');
+}
+
+// 只刷卡片，不重画正文：学完一章后回到目录，不需要把当前页滚回顶部。
+async function refreshPlanCard() {
+  try {
+    state.plan = await api('/plan');
+  } catch (error) {
+    return;
+  }
+  if (state.plan) renderTocFoot();
+}
+
+async function openPlan() {
+  state.view = 'plan';
+  state.chapterId = '';
+  location.hash = 'plan';
+  closeDrawers();
+  el('tutorWhere').textContent = '正在看学习排期';
+  el('tutorLog').innerHTML = `<div class="tutor-hint">
+    <p>排期只排「还没学会、也没被判跳过」的章。学完一章，第二天重排时它就不会再出现；
+    <b>诊断说你会的那几段，一开始就不占时间</b>。</p>
+  </div>`;
+  el('tutorQuick').innerHTML = '';
+  el('readerInner').innerHTML = '<div class="empty-state"><p>正在读排期…</p></div>';
+  try {
+    state.plan = await api('/plan');
+    renderPlan();
+  } catch (error) {
+    el('readerInner').innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function planDayHtml(group) {
+  const items = (group.items || []).map((item) => `
+    <div class="plan-item ${item.done ? 'done' : ''} ${item.overdue ? 'late' : ''}">
+      <span class="plan-no">${item.no}</span>
+      <button class="plan-title" data-open="${item.chapter_id}">${escapeHtml(item.title)}</button>
+      <span class="plan-min">${item.minutes} 分钟</span>
+      ${item.done
+    ? '<span class="plan-flag ok">已学完</span>'
+    : `<button class="plan-act" data-done="${item.chapter_id}">标记学完</button>`}
+    </div>`).join('');
+  return `<div class="plan-day ${group.is_today ? 'today' : ''} ${group.is_past ? 'past' : ''}">
+    <div class="plan-day-head">
+      <b>${group.is_today ? '今天' : escapeHtml(group.weekday)}</b>
+      <span class="plan-date">${shortDay(group.day)}</span>
+      <span class="plan-day-min">${group.minutes} 分钟</span>
+    </div>
+    ${items}
+  </div>`;
+}
+
+function renderPlan() {
+  const plan = state.plan;
+  if (!plan) {
+    el('readerInner').innerHTML = '<div class="empty-state"><p>读不到排期。</p></div>';
+    return;
+  }
+  const settings = plan.settings || {};
+  const stats = plan.stats || {};
+  const basis = plan.basis || {};
+  const checked = new Set(settings.weekdays || []);
+  const weekdays = [1, 2, 3, 4, 5, 6, 7].map((day) => `
+    <label class="plan-wd ${checked.has(day) ? 'on' : ''}">
+      <input type="checkbox" data-plan-day="${day}" ${checked.has(day) ? 'checked' : ''}>
+      ${'一二三四五六日'[day - 1]}
+    </label>`).join('');
+
+  const saved = basis.saved_minutes
+    ? `其中 ${basis.skipped} 章按摸底结果跳过，省下 ${hours(basis.saved_minutes)}。`
+    : '';
+  // stale 时不能按「当前画像」写说明：那句「共 33 章、省下 6.7 小时」自相矛盾
+  // ——33 章是上次排的，6.7 小时是现在才有的。分开说，别让用户自己猜哪句算数。
+  const intro = plan.stale
+    ? `这份排期是按上次画像排的：共 ${stats.slots} 章、${hours(stats.minutes_total)}，`
+      + `排进 ${stats.days} 个学习日${stats.end ? `，预计 ${shortDay(stats.end)} 收尾` : ''}。`
+      + '画像变化写在下面那条提示里，重排后才生效。'
+    : (plan.planned
+      ? `共 ${stats.slots} 章、${hours(stats.minutes_total)}，按每天 ${settings.minutes} 分钟排进 ${stats.days} 个学习日${stats.end ? `，预计 ${shortDay(stats.end)} 收尾` : ''}。${saved}`
+      : ((basis.learnable || 0) === 0
+        ? '没有要排的章节了：能学的都学完，或者被摸底诊断判过了。'
+        : `还没排。${basis.learnable || 0} 章待学、${hours(basis.minutes || 0)}。${saved}定好每天能投入多少，剩下的日期由程序算——不让模型猜你哪天有空。`));
+
+  const overdue = (stats.overdue || []).length;
+  const overdueHtml = overdue ? `<div class="gate plan-overdue">
+    有 ${overdue} 章（${stats.overdue_minutes} 分钟）没按计划完成。三种处理方式，选一个：
+    <div class="plan-strategies">
+      <button data-strategy="shift">顺延 · 结束日往后推</button>
+      <button data-strategy="compress">压缩 · 每天多塞一点</button>
+      <button data-strategy="drop">放弃 · 这几章本轮不排</button>
+    </div>
+  </div>` : '';
+  // 画像变了但排期没重排：不提示的话，页面一边说「共 33 章」，一边说
+  // 「10 章可以跳过」，用户不知道该信哪个。
+  const staleHtml = plan.stale ? `<div class="gate plan-stale">
+    摸底结果变了，这份排期还是按上次画像排的（现在有 ${basis.skipped} 章可以跳过）。
+    <button id="planStale">按新画像重排</button>
+  </div>` : '';
+
+  const dayHtml = (plan.days || []).map(planDayHtml).join('')
+    || '<p class="empty-hint">没有排进去的章节。</p>';
+
+  el('readerInner').innerHTML = `
+    <div class="reader-top">
+      <span class="stage-tag">学习排期</span>
+      <span>每天 ${settings.minutes} 分钟</span>
+      <span>·</span>
+      <span>${plan.planned ? `${stats.days} 个学习日` : '还没排'}</span>
+    </div>
+    <h1 class="diag-title">接下来每天学什么</h1>
+    <p class="diag-desc">${escapeHtml(intro)}</p>
+    ${overdueHtml}
+    ${staleHtml}
+
+    <div class="plan-settings">
+      <div class="plan-row">
+        <label>开始日 <input type="date" id="planStart" value="${escapeHtml(settings.start_date || plan.today || '')}" min="${escapeHtml(plan.today || '')}"></label>
+        <label>每天 <input type="number" id="planMinutes" min="10" max="480" step="10" value="${settings.minutes || 90}"> 分钟</label>
+      </div>
+      <div class="plan-row">
+        <span class="plan-label">每周</span>
+        <div class="plan-weekdays">${weekdays}</div>
+      </div>
+      <div class="plan-row">
+        <label class="plan-inline"><input type="checkbox" id="planInclude" ${settings.include_skipped ? 'checked' : ''}> 把诊断判过的章也排进来（复习）</label>
+      </div>
+      <div class="plan-actions">
+        <button class="btn primary" id="planBuild">${plan.planned ? '按这些设置重排' : '开始排期'}</button>
+        <button class="btn" id="planModel" title="模型只决定先学哪几章，日期和分钟仍由程序算">让 AI 排先后</button>
+        <span class="hint" id="planHint"></span>
+      </div>
+    </div>
+
+    <div class="plan-list">${dayHtml}</div>
+
+    ${plan.planned ? `<div class="plan-foot">
+      <span>已完成 ${stats.done} / ${stats.slots} 章 · 还剩 ${hours(stats.minutes_left)}</span>
+      <button class="plan-clear" id="planClear">清空排期</button>
+    </div>` : ''}`;
+
+  el('reader').scrollTop = 0;
+  bindPlan();
+}
+
+function bindPlan() {
+  const build = el('planBuild');
+  if (build) build.addEventListener('click', () => submitPlan(false));
+  const model = el('planModel');
+  if (model) model.addEventListener('click', () => submitPlan(true));
+  const clear = el('planClear');
+  if (clear) clear.addEventListener('click', clearPlan);
+  const stale = el('planStale');
+  if (stale) stale.addEventListener('click', () => submitPlan(false));
+
+  el('readerInner').querySelectorAll('[data-strategy]').forEach((btn) => {
+    btn.addEventListener('click', () => reschedulePlan(btn.dataset.strategy));
+  });
+  el('readerInner').querySelectorAll('[data-open]').forEach((btn) => {
+    btn.addEventListener('click', () => openChapter(btn.dataset.open));
+  });
+  el('readerInner').querySelectorAll('[data-done]').forEach((btn) => {
+    btn.addEventListener('click', () => markPlanDone(btn.dataset.done));
+  });
+  el('readerInner').querySelectorAll('[data-plan-day]').forEach((box) => {
+    box.addEventListener('change', () => {
+      box.closest('.plan-wd').classList.toggle('on', box.checked);
+    });
+  });
+}
+
+function planSettingsFromForm() {
+  const start = el('planStart') ? el('planStart').value : '';
+  const minutes = Number(el('planMinutes') ? el('planMinutes').value : 90);
+  const weekdays = [...el('readerInner').querySelectorAll('[data-plan-day]:checked')]
+    .map((box) => box.dataset.planDay).join(',');
+  const include = !!(el('planInclude') && el('planInclude').checked);
+  const hint = el('planHint');
+  if (!weekdays) {
+    if (hint) hint.textContent = '至少选一天。一周一天都不学，排期没法排。';
+    return null;
+  }
+  if (!minutes || minutes < 10) {
+    if (hint) hint.textContent = '每天至少 10 分钟。';
+    return null;
+  }
+  return { start_date: start, weekdays, minutes, include_skipped: include };
+}
+
+async function submitPlan(useModel) {
+  const config = planSettingsFromForm();
+  if (!config) return;
+  const button = el(useModel ? 'planModel' : 'planBuild');
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = useModel ? 'AI 排列中…' : '正在排…';
+  try {
+    const result = await api('/plan/build', {
+      method: 'POST',
+      body: JSON.stringify({ ...config, use_model: useModel }),
+    });
+    state.plan = result;
+    renderPlan();
+    const hint = el('planHint');
+    if (hint) {
+      if (!useModel) hint.textContent = '已按当前设置重排。';
+      else if (result.order_source === 'model') hint.textContent = `AI：${result.order_reason || '已按重点重排'}`;
+      else hint.textContent = result.order_reason || 'AI 不可用，按课程顺序排了。';
+    }
+    renderTocFoot();
+    renderProgress();
+  } catch (error) {
+    const hint = el('planHint');
+    if (hint) hint.textContent = error.message;
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+
+async function reschedulePlan(strategy) {
+  if (strategy === 'drop'
+    && !window.confirm('这几章本轮不再排。它们仍留在课程里，之后重排还会回来。继续？')) return;
+  const hint = el('planHint');
+  el('readerInner').querySelectorAll('[data-strategy]').forEach((btn) => { btn.disabled = true; });
+  try {
+    const result = await api('/plan/reschedule', {
+      method: 'POST',
+      body: JSON.stringify({ strategy }),
+    });
+    state.plan = result;
+    renderPlan();
+    const next = el('planHint');
+    if (next) {
+      next.textContent = strategy === 'drop'
+        ? `已放弃 ${result.dropped.length} 章，其余从今天重排。`
+        : `已重排，每天约 ${result.capacity} 分钟。`;
+    }
+  } catch (error) {
+    if (hint) hint.textContent = error.message;
+    el('readerInner').querySelectorAll('[data-strategy]').forEach((btn) => { btn.disabled = false; });
+  }
+}
+
+async function markPlanDone(chapterId) {
+  try {
+    // 排期不自己记「完成」：学习记录只有一套，就是 course_progress。
+    // 在排期页点完成和在章节页点学完走的是同一个接口。
+    await api('/course/progress', {
+      method: 'PATCH',
+      body: JSON.stringify({ chapter_id: chapterId, status: 'done' }),
+    });
+    await loadCourse();
+    renderPlan();
+  } catch (error) {
+    const hint = el('planHint');
+    if (hint) hint.textContent = error.message;
+  }
+}
+
+async function clearPlan() {
+  if (!window.confirm('清空排期？学习记录不会动，只是不再给你排日子。')) return;
+  try {
+    await api('/plan', { method: 'DELETE' });
+    state.plan = await api('/plan');
+    renderPlan();
+    renderTocFoot();
+  } catch (error) {
+    const hint = el('planHint');
+    if (hint) hint.textContent = error.message;
+  }
 }
 
 /* ---------------- 导师 ---------------- */
@@ -1093,6 +1417,10 @@ async function boot() {
     openProfile();
     return;
   }
+  if (fromHash === 'plan') {
+    openPlan();
+    return;
+  }
   const known = (state.course.chapters || []).some((c) => c.id === fromHash);
   const target = known ? fromHash : (state.course.next && state.course.next.id);
   if (target) openChapter(target);
@@ -1109,6 +1437,10 @@ async function boot() {
     }
     if (want === 'profile') {
       if (state.view !== 'profile') openProfile();
+      return;
+    }
+    if (want === 'plan') {
+      if (state.view !== 'plan') openPlan();
       return;
     }
     if (want && want !== state.chapterId) openChapter(want);

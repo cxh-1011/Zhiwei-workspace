@@ -201,6 +201,44 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_diagnostics_course ON diagnostics(course_id, id)")
 
+    # 学习排期的设置：每门课一行。开始日/每周哪几天/每天多少分钟都是用户给的
+    # 事实，不能由模型猜；改一次就重排一次，所以只存一行，不留历史。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS plan_settings(
+        course_id TEXT PRIMARY KEY,
+        start_date TEXT NOT NULL,
+        weekdays TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7',
+        minutes INTEGER NOT NULL DEFAULT 60,
+        include_skipped INTEGER NOT NULL DEFAULT 0,
+        catch_up TEXT NOT NULL DEFAULT 'shift',
+        basis_sig TEXT DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    # 排期是按「当时那张画像」排的。画像变了（重测诊断）而排期没重排，
+    # 页面上会出现「这张表说 33 章、画像说只学 23 章」的矛盾。存一个签名，
+    # 只用来提示「该重排了」，不自动改任何东西。
+    _ensure_column(cursor, "plan_settings", "basis_sig", "TEXT DEFAULT ''")
+
+    # 排期槽位：某天学某章。**只存还没学完的章**，学完由 course_progress 表达。
+    # 再存一份「这个槽完成了」就是两套真相，撤销时必然对不上。
+    # minutes 是排下去那一刻的快照：课程里改预计时长，不该让已经排好的日子
+    # 悄悄变长（那样用户今天一看，任务凭空多了半小时）。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS plan_slots(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 0,
+        chapter_id TEXT NOT NULL,
+        minutes INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_plan_slots_course ON plan_slots(course_id, day, seq)"
+    )
+
 
 
     cursor.execute("""
@@ -1056,6 +1094,102 @@ def latest_diagnostic(course_id):
         return None
     return {"id": row[0], "finished_at": row[1], "total": int(row[2] or 0),
             "correct": int(row[3] or 0), "payload": row[4] or "", "created_at": row[5]}
+
+
+# ======================
+# 学习排期
+# ======================
+
+def get_plan_settings(course_id):
+    """读排期设置；没排过返回 None（不是返回默认值——「没排过」和「排了但用默认
+    参数」在界面上是两件事：前者要显示「开始排期」，后者要显示「重新排」）。"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT start_date,weekdays,minutes,include_skipped,catch_up,updated_at,basis_sig "
+        "FROM plan_settings WHERE course_id=?",
+        (course_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "start_date": row[0],
+        "weekdays": row[1],
+        "minutes": int(row[2] or 0),
+        "include_skipped": bool(row[3]),
+        "catch_up": row[4] or "shift",
+        "updated_at": row[5],
+        "basis_sig": row[6] or "",
+    }
+
+
+def save_plan_settings(course_id, start_date, weekdays, minutes,
+                       include_skipped=False, catch_up="shift", basis_sig=""):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO plan_settings(course_id,start_date,weekdays,minutes,"
+        "include_skipped,catch_up,basis_sig,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(course_id) DO UPDATE SET start_date=excluded.start_date,"
+        "weekdays=excluded.weekdays,minutes=excluded.minutes,"
+        "include_skipped=excluded.include_skipped,catch_up=excluded.catch_up,"
+        "basis_sig=excluded.basis_sig,updated_at=CURRENT_TIMESTAMP",
+        (course_id, start_date, weekdays, int(minutes),
+         1 if include_skipped else 0, catch_up, basis_sig or ""),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_plan_slots(course_id):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id,day,seq,chapter_id,minutes FROM plan_slots "
+        "WHERE course_id=? ORDER BY day, seq, id",
+        (course_id,),
+    ).fetchall()
+    conn.close()
+    return [
+        {"id": row[0], "day": row[1], "seq": int(row[2] or 0),
+         "chapter_id": row[3], "minutes": int(row[4] or 0)}
+        for row in rows
+    ]
+
+
+def replace_plan_slots(course_id, slots):
+    """整份替换。排期是「接下来怎么走」的完整方案，不是可以逐条增删的流水账：
+    留一半旧槽一半新槽，会出现同一天两章重复、或某章被排了两次。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM plan_slots WHERE course_id=?", (course_id,))
+    cursor.executemany(
+        "INSERT INTO plan_slots(course_id,day,seq,chapter_id,minutes) VALUES(?,?,?,?,?)",
+        [
+            (course_id, slot["day"], int(slot.get("seq") or 0),
+             slot["chapter_id"], int(slot.get("minutes") or 0))
+            for slot in slots
+        ],
+    )
+    conn.commit()
+    rows = cursor.execute(
+        "SELECT id,day,seq,chapter_id,minutes FROM plan_slots "
+        "WHERE course_id=? ORDER BY day, seq, id",
+        (course_id,),
+    ).fetchall()
+    conn.close()
+    return [
+        {"id": row[0], "day": row[1], "seq": int(row[2] or 0),
+         "chapter_id": row[3], "minutes": int(row[4] or 0)}
+        for row in rows
+    ]
+
+
+def delete_plan(course_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM plan_slots WHERE course_id=?", (course_id,))
+    conn.execute("DELETE FROM plan_settings WHERE course_id=?", (course_id,))
+    conn.commit()
+    conn.close()
 
 
 # ======================

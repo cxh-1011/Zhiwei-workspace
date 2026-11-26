@@ -792,3 +792,159 @@ button { cursor: pointer; }
   background: #f7f8fd;
   color: #5c6480;
 }
+
+/* ---------- 学习排期 ---------- */
+
+/* 目录底部第三张卡。排期是「接下来干什么」，比诊断卡更常看，
+   所以用实线 + 靛蓝，和虚线的诊断卡分开。 */
+.plan-card {
+  margin-top: 9px;
+  padding: 9px 10px;
+  border: 1px solid #dfe3f7;
+  border-radius: 9px;
+  background: #fff;
+}
+.plan-card small { display: block; color: #7a82c0; font-size: 9px; letter-spacing: .06em; }
+.plan-card b { display: block; margin-top: 3px; color: #3d4590; font-size: 10.5px; font-weight: 500; line-height: 1.55; }
+.plan-card button {
+  margin-top: 7px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+}
+.plan-card.ready { background: #f8f9ff; }
+
+/* 设置区 */
+.plan-settings {
+  margin: 16px 0 20px;
+  padding: 12px 13px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: #fcfcfe;
+}
+.plan-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; margin-bottom: 9px; }
+.plan-row:last-of-type { margin-bottom: 0; }
+.plan-row label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 11.5px; }
+.plan-label { color: var(--muted); font-size: 11px; }
+.plan-row input[type="date"],
+.plan-row input[type="number"] {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 11.5px;
+}
+.plan-row input[type="number"] { width: 66px; }
+.plan-weekdays { display: flex; gap: 5px; }
+.plan-wd {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.plan-wd.on { border-color: #c9d0f4; background: var(--accent-soft); color: var(--accent); }
+.plan-wd input { display: none; }
+.plan-inline { gap: 6px; }
+.plan-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+.plan-actions .hint { font-size: 10.5px; }
+
+/* 按天分组。今天那张要一眼看见，否则用户要自己数日期。 */
+.plan-list { display: grid; gap: 11px; }
+.plan-day { border: 1px solid var(--line-2); border-radius: 10px; background: #fff; overflow: hidden; }
+.plan-day.today { border-color: #ccd4f8; }
+.plan-day.past { opacity: .72; }
+.plan-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line-2);
+  background: #fafbfd;
+}
+.plan-day.today .plan-day-head { background: var(--accent-soft); }
+.plan-day-head b { color: var(--ink); font-size: 12px; }
+.plan-day.today .plan-day-head b { color: var(--accent); }
+.plan-date { color: var(--muted); font-size: 10.5px; }
+.plan-day-min { margin-left: auto; color: var(--muted); font-size: 10.5px; }
+
+.plan-item { display: flex; align-items: center; gap: 9px; padding: 8px 12px; border-top: 1px solid var(--line-2); }
+.plan-day-head + .plan-item { border-top: 0; }
+.plan-no {
+  flex: 0 0 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #f1f3f9;
+  color: #6b7280;
+  font-size: 9.5px;
+}
+.plan-title {
+  flex: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  text-align: left;
+  line-height: 1.5;
+}
+.plan-title:hover { color: var(--accent); }
+.plan-min { color: var(--muted); font-size: 10.5px; }
+.plan-act {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 10.5px;
+}
+.plan-act:hover { border-color: #c9d0f4; color: var(--accent); }
+.plan-flag.ok { color: var(--ok); font-size: 10.5px; }
+.plan-item.done .plan-title { color: var(--muted); text-decoration: line-through; }
+.plan-item.done .plan-no { background: var(--ok-soft); color: var(--ok); }
+.plan-item.late { background: #fffaf2; }
+
+/* 掉队提示：这里没有「智能处理」，三种态度摆出来让人选 */
+.plan-overdue { border-color: #f0dcc0; background: #fffaf1; }
+.plan-strategies { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.plan-strategies button {
+  padding: 4px 9px;
+  border: 1px solid #ecd9b8;
+  border-radius: 6px;
+  background: #fff;
+  color: #8a6524;
+  font-size: 10.5px;
+}
+.plan-strategies button:hover { background: #fffdf8; border-color: #e2c99c; }
+.plan-strategies button:disabled { opacity: .55; cursor: default; }
+
+.plan-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.plan-clear { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 10.5px; text-decoration: underline; }
+
+/* 画像变了但排期没重排：这是提示，不是错误，用冷色不用警告色 */
+.plan-stale { border-color: #dfe4f3; background: #f7f8fd; color: #5c6480; }
+.plan-stale button {
+  margin-left: 6px;
+  padding: 3px 9px;
+  border: 1px solid #cfd5ee;
+  border-radius: 6px;
+  background: #fff;
+  color: #5868df;
+  font-size: 10.5px;
+}
