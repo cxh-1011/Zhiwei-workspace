@@ -404,6 +404,8 @@ def test_http():
     good = api.post("/projects/%s/check" % project["id"])
     check("填对后验收通过", good.status_code == 200 and good.json()["ok"], good.text[:200])
     check("结果写回项目行", good.json()["project"]["check_ok"] is True, good.json()["project"])
+    check("验收结果带 deps（没清单时说明什么都没做）",
+          good.json().get("deps", {}).get("changed") is False, good.json().get("deps"))
     check("列表能看到上次结果", api.get("/projects").json()["items"][0]["check_label"].startswith("验收通过"),
           api.get("/projects").json()["items"][0]["check_label"])
 
@@ -436,6 +438,48 @@ def test_http():
     bad_req = api.post("/projects/%s/deps" % project["id"])
     check("清单不合法时 400", bad_req.status_code == 400, bad_req.text[:200])
     check("400 指到第几行", "第 1 行" in bad_req.text, bad_req.text[:200])
+
+    # 清单改过 → 列表的 env 里看得出来（前端「更新依赖 +1」就靠这个字段）
+    with open(os.path.join(project["path"], "requirements.txt"), "w", encoding="utf-8") as fh:
+        fh.write("flask\n")
+    dirty_row = {item["id"]: item for item in api.get("/projects").json()["items"]}[project["id"]]
+    check("清单改了 → state=unrecorded",
+          dirty_row["env"]["requirements"]["state"] == "unrecorded",
+          dirty_row["env"]["requirements"])
+
+    # 这里的项目环境是个空文件（不真建 venv），pip 必然起不来。
+    # 换成真解释器、但没有 pip 的 venv 来验整条链路：装依赖失败不能让验收变成 500。
+    auto_proj = api.post("/projects", json={"name": "自动重装", "chapter_id": "s4c1"}).json()
+    envs.ensure(auto_proj["path"], with_pip=False, timeout=120)
+    with open(os.path.join(auto_proj["path"], "requirements.txt"), "w", encoding="utf-8") as fh:
+        fh.write("flask\n")
+    auto = api.post("/projects/%s/check" % auto_proj["id"])
+    check("自动重装失败时验收仍然 200", auto.status_code == 200, auto.text[:200])
+    check("结果里说清自动重装失败", bool(auto.json()["deps"]["error"]), auto.json().get("deps"))
+    retry = api.post("/projects/%s/check" % auto_proj["id"])
+    check("同一份清单不再自动重试", retry.json()["deps"]["changed"] is False,
+          retry.json().get("deps"))
+    failed_row = {item["id"]: item for item in api.get("/projects").json()["items"]}[auto_proj["id"]]
+    check("失败状态传到列表里",
+          failed_row["env"]["requirements"]["state"] == "failed",
+          failed_row["env"]["requirements"])
+
+    # JS 项目：验收跑 node，pip 那套完全不用参与
+    js_proj = api.post("/projects", json={"name": "JS 不装依赖", "chapter_id": "s2c3"}).json()
+    with open(os.path.join(js_proj["path"], "requirements.txt"), "w", encoding="utf-8") as fh:
+        fh.write("flask\n")
+    with open(os.path.join(js_proj["path"], "main.js"), "w", encoding="utf-8") as fh:
+        fh.write("module.exports = { extract_json: () => null, validate_weather: () => false };\n")
+    js_check = api.post("/projects/%s/check" % js_proj["id"])
+    check("JS 项目验收 200", js_check.status_code == 200, js_check.text[:160])
+    check("JS 项目不装 Python 依赖", js_check.json()["deps"]["state"] == "skip",
+          js_check.json().get("deps"))
+    check("JS 项目结果标明 node 语言", js_check.json()["language"] == "node",
+          js_check.json().get("language"))
+    js_row = {item["id"]: item for item in api.get("/projects").json()["items"]}[js_proj["id"]]
+    check("列表里也标了 node", js_row["language"] == "node", js_row.get("language"))
+    check("JS 项目的清单没被装（没有留下安装记录）",
+          envs.read_stamp(js_proj["path"]) is None, envs.read_stamp(js_proj["path"]))
 
     check("环境接口对不存在的项目 404", api.post("/projects/99999/env").status_code == 404)
     check("依赖接口对不存在的项目 404", api.post("/projects/99999/deps").status_code == 404)

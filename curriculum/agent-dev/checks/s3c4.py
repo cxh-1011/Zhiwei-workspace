@@ -15,7 +15,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 TOOLS = [
     {"name": "check_syntax",
@@ -46,7 +46,7 @@ def picks(module):
         try:
             got = fn(query, TOOLS)
         except Exception as exc:
-            wrong.append("%r 抛了 %s" % (query, type(exc).__name__))
+            wrong.append("%r 抛了 %s" % (query, why(exc)))
             continue
         if got != want:
             wrong.append("%r 选了 %r，应该选 %s（%s）" % (query, got, want, why))

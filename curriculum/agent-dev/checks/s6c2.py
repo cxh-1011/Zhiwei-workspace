@@ -14,7 +14,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 # 受控向量：甲和乙都朝 x 轴，丙朝 y 轴，"查询" 也是 x 轴。
 # 夹角越小越像，所以 甲(0) → 乙(1) → 丙(2)。
@@ -43,7 +43,7 @@ def cosine_cases(module):
         try:
             got = fn(a, b)
         except Exception as exc:
-            problems.append("%s：抛了 %s" % (label, type(exc).__name__))
+            problems.append("%s：抛了 %s" % (label, why(exc)))
             continue
         if not isinstance(got, (int, float)) or abs(float(got) - want) > 1e-6:
             problems.append("%s：%r，应该是 %s" % (label, got, want))
@@ -84,4 +84,5 @@ if __name__ == "__main__":
         ("余弦四种情形都对", cosine_cases),
         ("按相似度降序返回下标", ranks),
         ("所有下标都保留、不重不漏", keeps_all),
-    ])
+        # embed 是以参数传进去的函数，JS 那边接不住
+    ], languages=("python",))

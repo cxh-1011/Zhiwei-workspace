@@ -40,6 +40,7 @@ import profile as profile_lib
 import schedule as schedule_lib
 import projects as projects_lib
 import checks as checks_lib
+import runtimes as runtimes_lib
 import envs as envs_lib
 import model_store
 from tools.edits import restore_edits
@@ -1613,6 +1614,19 @@ def run_project_check(project_id: int):
         row = projects_lib.validate(project_id)
     except projects_lib.ProjectError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # 清单改过就先重装，再验收。不这么做的话，学生刚把 requests 写进清单、
+    # 转头点「跑验收」，看到的是「ModuleNotFoundError: requests」——他明明
+    # 写了依赖，却要自己猜到「还得再点一次装依赖」。装失败也不拦着验收：
+    # 那几条检查的结果他还是要看的，缺包的原因写在 deps 里。
+    #
+    # JS 项目不装 Python 依赖：验收跑在 node 上，pip 装的东西它一个都用不到。
+    # 真去装只会让他多等半分钟，而且还是「明明装了却没生效」。
+    if runtimes_lib.student_language(row["path"]) == "python":
+        deps = envs_lib.sync(row["path"])
+    else:
+        deps = {"changed": False, "installed": False, "state": "skip",
+                "packages": [], "added": [], "removed": [], "error": "",
+                "kind": "", "elapsed_ms": 0}
     try:
         result = checks_lib.run(row["path"], row["chapter_id"], row["course_id"])
     except checks_lib.CheckError as exc:
@@ -1622,6 +1636,7 @@ def run_project_check(project_id: int):
         project_id, result["ok"] if result["available"] else None,
         result.get("passed", 0), result.get("total", 0),
     )
+    result["deps"] = deps
     result["project"] = projects_lib.decorate(get_project_row(project_id))
     return result
 

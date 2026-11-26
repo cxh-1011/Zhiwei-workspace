@@ -13,7 +13,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 CASES = [
     ("上海明天 32℃，多云", "把这段话润色得更口语一点", "单位", "A 给了摄氏度，B 的指令没说保留单位"),
@@ -31,7 +31,7 @@ def warns(module):
         try:
             got = fn(a_resp, b_instruction)
         except Exception as exc:
-            problems.append("%s：抛了 %s" % (label, type(exc).__name__))
+            problems.append("%s：抛了 %s" % (label, why(exc)))
             continue
         if want is None:
             if got is not None:

@@ -10,7 +10,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 # (已用 token, 已用秒, 已用轮次, 期望)
 CASES = [
@@ -48,7 +48,7 @@ def budget(module):
         try:
             got = _name(fn(tokens, seconds, turns))
         except Exception as exc:
-            wrong.append("(%d, %d, %d) 抛了 %s" % (tokens, seconds, turns, type(exc).__name__))
+            wrong.append("(%d, %d, %d) 抛了 %s" % (tokens, seconds, turns, why(exc)))
             continue
         if got != want:
             wrong.append("(%d token, %d 秒, %d 轮) 应该报 %r，实际 %r"

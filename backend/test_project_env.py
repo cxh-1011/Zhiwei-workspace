@@ -15,6 +15,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import time
 
 TEMP = tempfile.mkdtemp(prefix="test_envs_")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -266,6 +267,205 @@ try:
     envs.ensure(os.path.join(TEMP, "no-such-dir"))
 except envs.EnvError as exc:
     check("ensure 对不存在的目录报错", "不存在" in str(exc), str(exc))
+
+# ---------------------------------------------------------------- 清单改了要重装
+
+section("清单指纹：只认「装什么」")
+check("顺序不影响指纹",
+      envs.fingerprint(["requests>=2.31", "flask"]) == envs.fingerprint(["flask", "requests>=2.31"]))
+check("大小写不影响指纹",
+      envs.fingerprint(["Flask"]) == envs.fingerprint(["flask"]),
+      (envs.fingerprint(["Flask"]), envs.fingerprint(["flask"])))
+check("行内注释不影响指纹",
+      envs.fingerprint(["flask  # 网页框架"]) == envs.fingerprint(["flask"]))
+check("空行不影响指纹",
+      envs.fingerprint(["flask", "", "   "]) == envs.fingerprint(["flask"]))
+check("加一个包就变",
+      envs.fingerprint(["flask"]) != envs.fingerprint(["flask", "requests"]))
+check("改版本号就变",
+      envs.fingerprint(["requests>=2.31"]) != envs.fingerprint(["requests>=2.32"]))
+
+section("state：清单和已装的是否一致")
+sync_demo = new_project("sync-demo")
+sync_req = os.path.join(sync_demo, "requirements.txt")
+
+
+def write_req(text):
+    with open(sync_req, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+check("没有清单时 state=none", envs.state(sync_demo)["state"] == "none", envs.state(sync_demo))
+envs.ensure(sync_demo, with_pip=False, timeout=120)
+write_req("flask\n")
+st = envs.state(sync_demo)
+check("有清单没记录 → unrecorded 且要装", st["state"] == "unrecorded" and st["dirty"] is True, st)
+check("unrecorded 时 info 也这么报",
+      envs.info(sync_demo)["requirements"]["state"] == "unrecorded", envs.info(sync_demo))
+
+envs._record_success(sync_demo, ["flask"])
+st = envs.state(sync_demo)
+check("记下之后 state=ok", st["state"] == "ok" and st["dirty"] is False, st)
+check("ok 时不报新增", st["added"] == [] and st["removed"] == [], st)
+
+write_req("flask\nrequests>=2.31\n")
+st = envs.state(sync_demo)
+check("加包 → changed", st["state"] == "changed" and st["dirty"] is True, st)
+check("说得出加了哪个", st["added"] == ["requests>=2.31"], st)
+check("没说删了什么", st["removed"] == [], st)
+
+write_req("flask\n")
+st = envs.state(sync_demo)
+check("改回去 → ok（指纹按清单算，不按时间）", st["state"] == "ok", st)
+
+write_req("requests>=2.31\n")
+st = envs.state(sync_demo)
+check("删包也能看出来", st["removed"] == ["flask"] and st["state"] == "changed", st)
+
+write_req("-e .\n")
+check("清单不合法 → invalid", envs.state(sync_demo)["state"] == "invalid", envs.state(sync_demo))
+check("invalid 时 info 的 error 有话说",
+      bool(envs.info(sync_demo)["requirements"]["error"]), envs.info(sync_demo))
+
+write_req("flask\n")
+st = envs.state(sync_demo)
+check("恢复成装过的那份 → ok", st["state"] == "ok", st)
+
+# 失败记录：同一份清单别再自动撞一次
+write_req("flask\nrequests>=2.31\n")
+envs._record_failure(sync_demo, ["flask", "requests>=2.31"], "网络不可达：connection timed out")
+st = envs.state(sync_demo)
+check("失败后 state=failed", st["state"] == "failed", st)
+check("失败不触发自动重试", st["dirty"] is False, st)
+check("失败原因带出来", "网络不可达" in st["error"], st)
+info = envs.info(sync_demo)
+check("info 把失败原因放 last_error（不是 error）",
+      "网络不可达" in info["requirements"]["last_error"]
+      and info["requirements"]["error"] == "", info["requirements"])
+check("成功那份记录没被失败覆盖",
+      envs.read_stamp(sync_demo)["packages"] == ["flask"], envs.read_stamp(sync_demo))
+
+write_req("flask\n")
+st = envs.state(sync_demo)
+check("改回装过的那份 → ok，不再提上次失败", st["state"] == "ok" and st["error"] == "", st)
+
+write_req("flask\nnumpy\n")
+st = envs.state(sync_demo)
+check("换成另一份清单 → 允许再试一次", st["state"] == "changed" and st["dirty"] is True, st)
+
+# 记录跟着环境走：.venv 被删掉，记录一起没了
+envs._record_success(sync_demo, ["flask"])
+envs._rm_venv(sync_demo)
+check("删掉 .venv 后记录也没了",
+      envs.read_stamp(sync_demo) is None, envs.read_stamp(sync_demo))
+check("删掉 .venv 后 state=no_env", envs.state(sync_demo)["state"] == "no_env",
+      envs.state(sync_demo))
+
+section("sync：只在清单变了的时候动手")
+sync_project = new_project("sync-run")
+envs.ensure(sync_project, with_pip=False, timeout=120)
+with open(os.path.join(sync_project, "requirements.txt"), "w", encoding="utf-8") as handle:
+    handle.write("flask\n")
+envs._record_success(sync_project, ["flask"])
+result = envs.sync(sync_project)
+check("没改就什么都不做", result["changed"] is False and result["installed"] is False, result)
+check("没改时耗时是 0（说明真没起进程）", result["elapsed_ms"] == 0, result)
+
+# 改了：这个 venv 是 --without-pip 建的，pip 必然失败。用它来验「失败也要记下来」。
+with open(os.path.join(sync_project, "requirements.txt"), "w", encoding="utf-8") as handle:
+    handle.write("flask\nrequests>=2.31\n")
+first = envs.sync(sync_project, timeout=60)
+check("失败不抛异常，写进返回值", first["changed"] is True and first["installed"] is False, first)
+check("失败时带上原因", bool(first["error"]), first)
+check("失败后 state=failed", envs.state(sync_project)["state"] == "failed",
+      envs.state(sync_project))
+
+second = envs.sync(sync_project, timeout=60)
+check("第二次不再自动重试", second["changed"] is False and second["elapsed_ms"] == 0, second)
+check("但仍然告诉调用方上次失败了", bool(second["error"]), second)
+
+section("断网和包名写错要分开说")
+# 这两段输出来自真机（PIP_INDEX_URL 指向一个没人监听的端口）。
+# 注意它们的结尾一模一样：都是 No matching distribution found。
+OFFLINE_OUTPUT = (
+    "WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, "
+    "status=None)) after connection broken by 'NewConnectionError('<pip._vendor."
+    "urllib3.connection.HTTPConnection object at 0x1>: Failed to establish a new "
+    "connection: [WinError 10061] 由于目标计算机积极拒绝，无法连接。')': /simple/requests/\n"
+    "ERROR: Could not find a version that satisfies the requirement requests>=2.31 "
+    "(from versions: none)\n"
+    "ERROR: No matching distribution found for requests>=2.31\n"
+)
+MISSING_OUTPUT = (
+    "ERROR: Could not find a version that satisfies the requirement zhiwei-nope "
+    "(from versions: none)\n"
+    "ERROR: No matching distribution found for zhiwei-nope\n"
+)
+
+check("断网判成 offline", envs.failure_kind(OFFLINE_OUTPUT) == "offline",
+      envs.failure_kind(OFFLINE_OUTPUT))
+check("包名写错判成 missing", envs.failure_kind(MISSING_OUTPUT) == "missing",
+      envs.failure_kind(MISSING_OUTPUT))
+check("两种输出结尾是同一句 ERROR，结论仍然不同",
+      "No matching distribution found" in OFFLINE_OUTPUT
+      and "No matching distribution found" in MISSING_OUTPUT
+      and envs.failure_kind(OFFLINE_OUTPUT) != envs.failure_kind(MISSING_OUTPUT))
+
+offline_msg = envs._fail_message("offline", 1, OFFLINE_OUTPUT)
+check("断网的话先说「要联网」", "联网" in offline_msg, offline_msg[:80])
+check("断网的话给出下一步", "重试装依赖" in offline_msg, offline_msg[:120])
+check("断网的话不安罪给包名", "拼错" not in offline_msg, offline_msg[:120])
+missing_msg = envs._fail_message("missing", 1, MISSING_OUTPUT)
+check("包名写错的话先说拼错", "拼错" in missing_msg, missing_msg[:80])
+check("包名写错的话不说断网", "连不上" not in missing_msg, missing_msg[:80])
+check("原话仍然附在后面", "No matching distribution" in offline_msg, offline_msg[-120:])
+
+section("pip 被杀后留下的临时目录要清掉")
+litter = new_project("litter")
+for name in ("pip-build-tracker-abc", "pip-install-x1", "pip-ephem-wheel-cache-z"):
+    os.makedirs(os.path.join(litter, name))
+keep = os.path.join(litter, "mypackage")
+os.makedirs(keep)
+with open(os.path.join(litter, "main.py"), "w", encoding="utf-8") as handle:
+    handle.write("print(1)\n")
+envs._clean_pip_leftovers(litter)
+check("清掉了 pip 的三类临时目录",
+      not glob.glob(os.path.join(litter, "pip-*")), os.listdir(litter))
+check("没动学生自己的东西",
+      os.path.isdir(keep) and os.path.isfile(os.path.join(litter, "main.py")),
+      os.listdir(litter))
+
+section("真断网装一次：几十秒内失败，并且说清是网络")
+offline_project = new_project("offline-install")
+with open(os.path.join(offline_project, "requirements.txt"), "w", encoding="utf-8") as handle:
+    handle.write("requests>=2.31\n")
+# 带 pip 的 venv 只有这一处需要（其余用例都用 --without-pip 省时间）
+envs.ensure(offline_project, timeout=180)
+previous_index = os.environ.get("PIP_INDEX_URL")
+os.environ["PIP_INDEX_URL"] = "http://127.0.0.1:9/simple"
+started = time.monotonic()
+offline_error = ""
+try:
+    try:
+        envs.install(offline_project, timeout=120)
+    except envs.EnvError as exc:
+        offline_error = str(exc)
+    elapsed = time.monotonic() - started
+finally:
+    if previous_index is None:
+        os.environ.pop("PIP_INDEX_URL", None)
+    else:
+        os.environ["PIP_INDEX_URL"] = previous_index
+
+check("连不上时不该装成功", bool(offline_error), offline_error[:120])
+check("没有等满 120 秒", elapsed < 60, round(elapsed, 1))
+check("说的话点明是网络", "连不上 PyPI" in offline_error, offline_error[:200])
+check("顺手告诉了下一步", "重试装依赖" in offline_error, offline_error[:200])
+check("失败类型记成 offline", envs.state(offline_project)["kind"] == "offline",
+      envs.state(offline_project))
+check("没把断网说成包名拼错", "拼错" not in offline_error, offline_error[:200])
+check("这次失败不会自动重试", envs.sync(offline_project)["changed"] is False,
+      envs.sync(offline_project))
 
 # ---------------------------------------------------------------- 收尾
 

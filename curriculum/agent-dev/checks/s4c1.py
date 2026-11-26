@@ -11,7 +11,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 SAMPLE = """Thought: 用户想知道明天上海的天气，需要查实时数据
 Action: search
@@ -76,7 +76,7 @@ def missing_fields(module):
         raise
     except Exception as exc:
         return False, "缺字段时直接抛异常了（%s: %s）。应返回空字符串的字段。" % (
-            type(exc).__name__, str(exc)[:80])
+            why(exc), str(exc)[:80])
     ok = data.get("action", "") == "" and data.get("action_input", "") == ""
     return ok, "缺字段的项应该是空串，现在是 action=%r、action_input=%r" % (
         data.get("action"), data.get("action_input"))

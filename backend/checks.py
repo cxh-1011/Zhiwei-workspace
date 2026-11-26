@@ -34,6 +34,7 @@ import subprocess
 import time
 
 import envs
+import runtimes
 from course import CURRICULUM_ROOT, DEFAULT_COURSE
 
 DEFAULT_TIMEOUT = 90
@@ -190,6 +191,13 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
     timeout = max(5, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     # 项目有自己的 venv 就用它：学生在里面装的包，验收必须看得见
     python, python_source = envs.python_for(target)
+    # 学生可能用 JS 写这一章的代码。语言按文件判断，node 的路径由这里一次性
+    # 查好塞给子进程：`_kit` 在执行子进程里不该再猜一遍「本机有没有 node」。
+    language = runtimes.student_language(target)
+    node = runtimes.get("node") if language == "node" else None
+    env = _clean_env()
+    if node:
+        env["ZHIWEI_NODE"] = node["path"]
     started = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -197,7 +205,7 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
             cwd=target,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_clean_env(),
+            env=env,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -227,6 +235,8 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
             "available": True, "ok": False, "passed": 0, "total": 0,
             "items": [], "elapsed_ms": elapsed, "timed_out": True,
             "python_source": python_source,
+            "language": language,
+            "runtime_version": (node or {}).get("version", ""),
             "error": "验收超过 %d 秒没结束，已终止。检查一下有没有死循环或阻塞的网络请求。" % timeout,
             "stdout": out, "stderr": err[-2000:],
         }
@@ -237,6 +247,8 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
             "available": True, "ok": False, "passed": 0, "total": 0,
             "items": [], "elapsed_ms": elapsed, "timed_out": False,
             "python_source": python_source,
+            "language": language,
+            "runtime_version": (node or {}).get("version", ""),
             "error": "验收脚本没有输出结果（最后一行不是合法 JSON）。"
                      "这是验收脚本的问题，不是你代码的问题；下面是对应输出。",
             "stdout": out[-4000:], "stderr": err[-2000:],
@@ -250,6 +262,10 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
         # 验收跑在哪个解释器上：前端据此显示「项目环境 / 默认环境」，
         # 也是排查「装了包却说没装」时第一个要看的东西
         "python_source": python_source,
+        # 学生代码是什么语言、跑在哪个运行时上。前端据此把「项目环境」
+        # 换成「Node 22.22.2」——JS 项目里 venv 根本没参与验收。
+        "language": language,
+        "runtime_version": (node or {}).get("version", ""),
         "error": "",
         # 只有在没过的时候才把原始输出带回去：过了还塞 4KB 日志纯属噪音
         "stdout": "" if result["ok"] else out[-4000:],

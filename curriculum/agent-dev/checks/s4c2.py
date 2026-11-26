@@ -17,7 +17,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 STOP = [
     "查不到就放弃",
@@ -41,7 +41,7 @@ def stops(module):
         try:
             got = fn(text)
         except Exception as exc:
-            wrong.append("%r 抛了 %s" % (text[:20], type(exc).__name__))
+            wrong.append("%r 抛了 %s" % (text[:20], why(exc)))
             continue
         if not got:
             wrong.append("%r 应该停" % text[:20])
@@ -55,7 +55,7 @@ def goes_on(module):
         try:
             got = fn(text)
         except Exception as exc:
-            wrong.append("%r 抛了 %s" % (text[:20], type(exc).__name__))
+            wrong.append("%r 抛了 %s" % (text[:20], why(exc)))
             continue
         if got:
             wrong.append("%r 不该停（这轮还要继续）" % text[:20])

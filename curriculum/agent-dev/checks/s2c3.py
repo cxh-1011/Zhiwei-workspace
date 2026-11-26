@@ -17,7 +17,7 @@
 import json
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 GOOD = {"city": "北京", "temperature": 25, "unit": "celsius"}
 
@@ -49,7 +49,7 @@ def extract(module):
         try:
             got = fn(text)
         except Exception as exc:
-            problems.append("%s：抛了 %s" % (label, type(exc).__name__))
+            problems.append("%s：抛了 %s" % (label, why(exc)))
             continue
         if not isinstance(got, dict):
             problems.append("%s：返回了 %s，应该返回字典" % (label, type(got).__name__))
@@ -66,7 +66,7 @@ def validate(module):
         try:
             got = fn(data)
         except Exception as exc:
-            problems.append("%s：抛了 %s" % (label, type(exc).__name__))
+            problems.append("%s：抛了 %s" % (label, why(exc)))
             continue
         if got is not want:
             problems.append("%s：应该 %s，返回了 %r（要布尔值，不要字符串）"

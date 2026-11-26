@@ -13,7 +13,7 @@
 import json
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 ONE = [
     {"role": "user", "content": "帮我查下今天北京天气"},
@@ -87,7 +87,7 @@ def broken_args(module):
         steps = fn(BROKEN)
     except Exception as exc:
         return False, "参数是半截 JSON 时抛了 %s。应该把 args 设为 None 继续往下走。" % (
-            type(exc).__name__)
+            why(exc))
     if not isinstance(steps, list) or len(steps) != 1:
         return False, "应该还原出 1 步，实际是 %r" % (steps,)
     args = steps[0].get("args", steps[0].get("arguments"))

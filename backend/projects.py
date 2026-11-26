@@ -25,6 +25,7 @@ import shutil
 
 import database
 import envs
+import runtimes
 from course import CURRICULUM_ROOT, DEFAULT_COURSE
 from tools import _guard
 
@@ -121,6 +122,13 @@ def _starter_readme(name, course_id, chapter_id):
     lines.append("")
     lines.append("在这个目录里直接跑 `python -m pytest .`，或者在页面上点「跑验收」。")
     lines.append("验收脚本只读你的代码、不修改它；没过时会指出哪一条没满足。")
+    lines.append("")
+    lines.append("## 也可以用 JavaScript 写")
+    lines.append("")
+    lines.append("把代码放 `main.js` 里（不要同时留 `main.py`），验收会用 node 跑它。")
+    lines.append("要求一样：`module.exports = { 函数名: ... }`，函数名见下面的验收要求。")
+    lines.append("有三章（第 1 章第三节、第 6 章第二节、第 7 章第一节）只能 Python——")
+    lines.append("那几章的验收要把一个函数当参数传进你的代码，跨语言传不进去。")
     lines.append("")
     lines.append("## 需要额外依赖时")
     lines.append("")
@@ -303,11 +311,17 @@ def decorate(row):
         return None
     item = dict(row)
     item["exists"] = os.path.isdir(row["path"])
+    # 这一章他选了哪种语言：有 .py 就是 Python，只有 .js 才是 JS。
+    # 前端据此把「准备环境 / 装依赖」换掉——JS 项目不需要 venv，摆着一个
+    # 「准备环境」按钮只会让他白等十几秒。
+    item["language"] = runtimes.student_language(row["path"]) if item["exists"] else "python"
     # 环境状态直接看磁盘，不存库：.venv 被手动删掉之后，库里那条记录就成了谎话。
     # 代价是每次列项目都读一遍 requirements.txt——学习项目的文件只有几个，无所谓。
     item["env"] = envs.info(row["path"]) if item["exists"] else {
         "present": False, "python": "system", "version": "", "pip": False,
-        "requirements": {"present": False, "count": 0, "error": ""},
+        "requirements": {"present": False, "count": 0, "error": "", "state": "none",
+                         "dirty": False, "added": [], "removed": [], "last_error": "",
+                         "kind": ""},
     }
     if item["check_ok"] is None:
         item["check_label"] = "还没验收"

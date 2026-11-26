@@ -1274,13 +1274,24 @@ function projectCardHtml() {
 
 /* 环境状态放在路径旁边，因为它解释的是「这条路径里发生的事跑在哪个 Python 上」。
 
-   不做的两件事：不自动建（十几秒，且 33 章验收只用标准库，多数项目不需要），
+   清单那一格有四种说法，对应 envs.state() 的结论：
+   - 依赖已装：装的就是这份清单，不用管；
+   - 更新依赖 +1：清单改过了，跑验收时会自动装（也可以现在点）；
+   - 装依赖 3：有清单没记录（可能是自己在终端装的），装一次就有了记录；
+   - 依赖装失败：同一份清单刚失败过，不自动重试，等人点「重试」。
+
+   不做的两件事：不自动建环境（十几秒，且 33 章验收只用标准库），
    不隐藏按钮（需要的时候找得到，不需要的时候也看得见它是可选的）。 */
 function envHtml(item) {
   if (!item || !item.exists) return '';
   const env = item.env || {};
   const req = env.requirements || {};
   const parts = [];
+  // JS 项目不谈 venv：验收跑在 node 上，pip 装的东西它一个都用不到。
+  // 这里换成一个只读的标注，避免他点「准备环境」白等十几秒。
+  if (item.language === 'node') {
+    return '<span class="proj-env on" title="项目里有 main.js，验收会用 node 跑它">JS 项目</span>';
+  }
   if (env.present) {
     parts.push(`<span class="proj-env on" title="验收和 python 命令都跑在这个环境里">项目环境${env.version ? ' ' + escapeHtml(env.version) : ''}</span>`);
   } else {
@@ -1291,19 +1302,45 @@ function envHtml(item) {
   // 以为「环境没了」或「清单没事」。
   if (req.error) {
     parts.push(`<span class="proj-env bad" title="${escapeHtml(req.error)}">requirements.txt 有问题</span>`);
-  } else if (env.present && req.present) {
+    return parts.join('');
+  }
+  if (!env.present || !req.present) return parts.join('');
+
+  if (req.state === 'failed') {
+    parts.push(`<span class="proj-env bad" title="${escapeHtml((req.last_error || '').slice(0, 600))}">依赖装失败</span>`);
+    parts.push(`<button class="proj-env" data-deps="${item.id}"
+      title="重新按 requirements.txt 装一遍（会联网）">重试装依赖</button>`);
+  } else if (req.state === 'changed') {
+    parts.push(`<button class="proj-env warn" data-deps="${item.id}"
+      title="清单和已装的不一样：跑验收时会自动重装；也可以现在点（会联网）">更新依赖${deltaText(req)}</button>`);
+  } else if (req.state === 'unrecorded') {
     parts.push(`<button class="proj-env" data-deps="${item.id}"
       title="按 requirements.txt 装进项目环境（会联网）">装依赖${req.count ? ' ' + req.count : ''}</button>`);
+  } else if (req.count) {
+    parts.push(`<span class="proj-env on" title="requirements.txt 里的包都已经装进项目环境">依赖已装 ${req.count}</span>`);
   }
   return parts.join('');
+}
+
+function deltaText(req) {
+  const added = (req.added || []).length;
+  const removed = (req.removed || []).length;
+  if (!added && !removed) return '';
+  return ` +${added}${removed ? ' −' + removed : ''}`;
 }
 
 /* 验收结果：过了就一行绿的，没过逐条列出。
    失败项的 detail 是验收脚本写的「应该是什么、你写成了什么」，
    直接原样显示——改写它只会丢掉最有用的一半信息。 */
 /* 验收跑在哪个解释器上。「明明装了包却说没装」时这是第一个要看的东西，
-   所以放在结果标题里，不用再展开一层。 */
+   所以放在结果标题里，不用再展开一层。
+
+   JS 项目先说 Node：那时 venv 根本没参与验收，说「项目环境」会让人以为
+   是 python 在跑。 */
 function whereText(result) {
+  if (result.language === 'node') {
+    return ` · Node${result.runtime_version ? ' ' + result.runtime_version : ''}`;
+  }
   if (result.python_source === 'venv') return ' · 项目环境';
   if (result.python_source === 'system') return ' · 默认环境';
   return '';
@@ -1330,9 +1367,32 @@ function checkDetailHtml(result) {
     ? `验收通过 ${result.passed}/${result.total}（${Math.round((result.elapsed_ms || 0) / 100) / 10}s）${whereText(result)}`
     : `验收没过 ${result.passed}/${result.total}${whereText(result)}`;
   return `<div class="proj-check ${result.ok ? 'ok' : 'bad'}">
-    <b>${escapeHtml(head)}</b><ul>${rows}</ul>
+    <b>${escapeHtml(head)}</b>${depsNoteHtml(result.deps)}<ul>${rows}</ul>
     ${result.stdout && !result.ok ? `<details><summary>你的程序输出</summary><pre>${escapeHtml(result.stdout)}</pre></details>` : ''}
   </div>`;
+}
+
+/* 验收前有没有因为「清单改过」而重装。学生不关心 pip 的日志，只关心两件事：
+   装上了没有、没装上会不会影响这份结果。所以成功只说一句。
+
+   断网要单独说一句：这时「跑验收」本身是好的，只是缺包，不该让他以为代码坏了，
+   更不该让他去改包名（pip 在断网和包名写错时给的是同一句 ERROR）。 */
+function depsNoteHtml(deps) {
+  if (!deps || !deps.changed) return '';
+  const secs = Math.round((deps.elapsed_ms || 0) / 100) / 10;
+  if (deps.installed) {
+    const names = (deps.packages || []).join('、');
+    return `<div class="proj-deps ok">清单改过了，验收前已自动重装${names ? '：' + escapeHtml(names) : ''}（${secs}s）</div>`;
+  }
+  const reason = deps.error || '原因不明';
+  const offline = deps.kind === 'offline';
+  const head = offline
+    ? '清单改过了，但装依赖要联网、现在连不上——下面的结果可能缺包。'
+    : (deps.kind === 'missing'
+      ? '清单改过了，但 PyPI 上找不到这个包（名字可能拼错了）——下面的结果可能缺包。'
+      : '清单改过了，但自动重装失败——下面的结果可能缺包。');
+  return `<div class="proj-deps bad" title="${escapeHtml(reason)}">${head}</div>
+    <details class="proj-deps-more"><summary>装依赖为什么失败</summary><pre>${escapeHtml(reason)}</pre></details>`;
 }
 
 /* 记住「这一章上次在用哪个项目」。
@@ -1487,7 +1547,12 @@ async function createProject() {
 async function runProjectCheck(id) {
   const hint = el('projHint');
   const row = (state.projects || []).find((item) => item.id === id);
-  hint.textContent = row ? `正在跑「${row.name}」的验收…` : '正在跑验收…';
+  const deps = row && row.env && row.env.requirements;
+  // 清单改过时先说要等：重装要联网，可能几十秒；不提前讲，
+  // 学生会以为页面卡死了，然后在装到一半时刷新。
+  hint.textContent = deps && deps.dirty
+    ? `清单改过了，先重装依赖再验收（会联网，可能一两分钟）…`
+    : (row ? `正在跑「${row.name}」的验收…` : '正在跑验收…');
   try {
     const result = await api(`/projects/${id}/check`, { method: 'POST' });
     state.checkResult = { id, result };

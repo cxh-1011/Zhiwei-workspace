@@ -9,7 +9,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 # (输入, 期望)。正例故意包含小数（0.5 元是真实价格），
 # 反例覆盖「只有元」「没有元」「中文数字」「元在数字前面」四种常见漏判。
@@ -33,7 +33,7 @@ def price_check(module):
         try:
             got = fn(text)
         except Exception as exc:
-            wrong.append("%r 抛异常（%s）" % (text, type(exc).__name__))
+            wrong.append("%r 抛异常（%s）" % (text, why(exc)))
             continue
         if bool(got) != want:
             wrong.append("%r 应该是 %s，返回了 %r" % (text, want, got))

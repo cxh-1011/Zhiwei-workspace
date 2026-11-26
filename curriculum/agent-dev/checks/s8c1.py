@@ -16,7 +16,7 @@
 import json
 import sys
 
-from _kit import expect_callable, read_json, run
+from _kit import expect_callable, read_json, run, why
 
 KEYS = ("input", "expected_output", "actual_output", "failure_reason")
 
@@ -57,7 +57,7 @@ def tolerates_missing(module):
         got = fn(dict(PARTIAL))
     except Exception as exc:
         return False, "日志缺 output 和 expected_output 时抛了 %s。应该用空串补上。" % (
-            type(exc).__name__)
+            why(exc))
     problems = []
     if not isinstance(got, dict):
         return False, "返回了 %s，应该返回字典" % type(got).__name__

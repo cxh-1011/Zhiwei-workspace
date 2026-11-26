@@ -23,7 +23,7 @@ import os
 import sys
 import tempfile
 
-from _kit import Missing, run
+from _kit import Missing, run, why
 
 
 def _flag_class(module):
@@ -77,7 +77,7 @@ def cancel_twice(module):
         flag.cancel()
     except Exception as exc:
         return False, "第二次 cancel() 抛了 %s。文件已经没了，直接返回就行。" % (
-            type(exc).__name__)
+            why(exc))
     return True, ""
 
 
@@ -90,7 +90,7 @@ def not_started(module):
         flag.cancel()
     except Exception as exc:
         return False, "没 start 就 cancel 抛了 %s。这时文件本来就不存在。" % (
-            type(exc).__name__)
+            why(exc))
     return True, ""
 
 

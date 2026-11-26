@@ -17,7 +17,7 @@
 import json
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 CASES_OK = [
     ('{"city": "北京"}', {"city": "北京"}, "只有一个参数"),
@@ -38,7 +38,7 @@ def _raised(fn, raw):
     try:
         fn(raw, required=("city",))
     except Exception as exc:  # noqa: BLE001 —— 抛什么类型不重要，抛了就行
-        return True, "%s" % type(exc).__name__
+        return True, "%s" % why(exc)
     return False, ""
 
 
@@ -49,7 +49,7 @@ def accepts(module):
         try:
             got = fn(raw, required=("city",))
         except Exception as exc:
-            problems.append("%s：抛了 %s（%s）" % (label, type(exc).__name__, str(exc)[:60]))
+            problems.append("%s：抛了 %s（%s）" % (label, why(exc), str(exc)[:60]))
             continue
         if got != want:
             problems.append("%s：返回 %r，应该是 %r" % (label, got, want))

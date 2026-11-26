@@ -103,4 +103,6 @@ if __name__ == "__main__":
     run(sys.argv[1] if len(sys.argv) > 1 else ".", [
         ("每字符一 token 时两半之和正确", plain_count),
         ("换一种 encode 仍然正确", chunky_count),
-    ], extra=[("context_limit.md 写出了模型上限", limit_note)])
+        # 这一章要把一个 encode 函数传进你的代码：跨语言传不了
+    ], extra=[("context_limit.md 写出了模型上限", limit_note)],
+        languages=("python",))

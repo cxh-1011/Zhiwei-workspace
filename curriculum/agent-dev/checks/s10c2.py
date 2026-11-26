@@ -15,7 +15,7 @@
 
 import sys
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 CASE = [
     ("每次点运行都要等 30 秒，太慢了", "太慢"),
@@ -59,7 +59,7 @@ def classifies(module):
         try:
             got = _category(fn(text))
         except Exception as exc:
-            wrong.append("%r 抛了 %s" % (text[:16], type(exc).__name__))
+            wrong.append("%r 抛了 %s" % (text[:16], why(exc)))
             continue
         if got != want:
             wrong.append("%r → %r，应该是 %s" % (text[:16], got, want))
@@ -73,7 +73,7 @@ def levels(module):
         try:
             got = _level(fn(repeat, blocks))
         except Exception as exc:
-            wrong.append("(%s, %s) 抛了 %s" % (repeat, blocks, type(exc).__name__))
+            wrong.append("(%s, %s) 抛了 %s" % (repeat, blocks, why(exc)))
             continue
         if got != want:
             wrong.append("(重复=%s, 阻断=%s) → %r，应该是 %s"

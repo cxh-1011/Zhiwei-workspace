@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-from _kit import expect_callable, read_json, run
+from _kit import expect_callable, read_json, run, why
 
 OLD = [
     {"question": "查上海天气", "content": "", "tool_calls": [{"name": "get_weather"}]},
@@ -73,7 +73,7 @@ def different_length(module):
         got = fn(OLD, NEW[:2])
     except Exception as exc:
         return False, "新版比旧版短时抛了 %s。少一道题本身也是一种差异，不该崩。" % (
-            type(exc).__name__)
+            why(exc))
     return isinstance(got, list), "返回了 %s，应该返回列表" % type(got).__name__
 
 

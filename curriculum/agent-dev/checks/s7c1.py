@@ -65,4 +65,5 @@ if __name__ == "__main__":
         ("三块分三次送出去", sends_each),
         ("空块和 None 跳过", skip_empty),
         ("生成器输入也逐块处理", generator),
-    ])
+        # sink 是验收传进去的回调，而且有的用例传的是生成器
+    ], languages=("python",))

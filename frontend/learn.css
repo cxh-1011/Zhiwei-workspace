@@ -1091,6 +1091,27 @@ button { cursor: pointer; }
   cursor: default;
 }
 .proj-env.bad { border-color: #eccfca; color: #b4513f; cursor: default; }
+/* 「清单改过了」是待办不是状态，所以用虚线+颜色提醒，点一下就装 */
+.proj-env.warn { border-color: #e4d3b4; color: #8a6a2f; }
+
+/* 验收前的自动重装：成功一行，失败两行（一句结论 + 展开的原始输出） */
+.proj-deps {
+  margin: 0 0 4px;
+  font-size: 10.5px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+.proj-deps.ok { color: #35694a; }
+.proj-deps.bad { color: #a8503f; }
+.proj-deps-more summary { color: var(--muted); font-size: 10.5px; cursor: pointer; }
+.proj-deps-more pre {
+  max-height: 160px;
+  overflow: auto;
+  margin: 3px 0 5px;
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 /* 验收结果贴在行里：改一轮跑一次，上下两次能直接对比 */
 .proj-check {

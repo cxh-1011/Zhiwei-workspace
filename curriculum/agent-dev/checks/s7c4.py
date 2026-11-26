@@ -18,7 +18,7 @@ import os
 import sys
 import tempfile
 
-from _kit import expect_callable, run
+from _kit import expect_callable, run, why
 
 LINES = [
     {"ts": "2026-11-20T10:00:01", "trace_id": "test-123", "step": "read_file",
@@ -84,7 +84,7 @@ def missing_file(module):
         got = fn("test-123", os.path.join(tempfile.gettempdir(), "no_such_trace.log"))
     except Exception as exc:
         return False, "文件不存在时抛了 %s。日志滚掉、路径写错都很常见，应该返回空列表。" % (
-            type(exc).__name__)
+            why(exc))
     return got == [], "文件不存在应该返回空列表，实际 %r" % (got,)
 
 

@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 
-from _kit import expect_callable, read_text, run
+from _kit import expect_callable, read_text, run, why
 
 # 正文第 1 题要存的那条
 CONTENT = "让模型帮你改代码时，必须用 black 格式化"
@@ -107,7 +107,7 @@ def tolerates_blank(module, project_dir):
         try:
             got = search(path, "code")
         except Exception as exc:
-            return False, "遇到空行抛了 %s。空行应该跳过。" % type(exc).__name__
+            return False, "遇到空行抛了 %s。空行应该跳过。" % why(exc)
         return got == [CONTENT], "空行之后读出来是 %r" % (got,)
     finally:
         _drop(path)
