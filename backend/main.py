@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -37,6 +38,8 @@ import course as course_lib
 import quiz as quiz_lib
 import profile as profile_lib
 import schedule as schedule_lib
+import projects as projects_lib
+import checks as checks_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -58,6 +61,7 @@ from database import (
     set_learning_task_status, delete_learning_task, replace_unfinished_learning_tasks,
     list_course_progress, set_course_progress, add_course_question, list_course_questions,
     get_plan_settings, save_plan_settings, list_plan_slots, replace_plan_slots, delete_plan,
+    set_project_check, delete_project, get_project as get_project_row,
 )
 
 
@@ -179,6 +183,14 @@ backup_db()
 
 init_db()
 
+# 登记过的项目根只存在内存里，进程重启就空了。少了这一步，重启后第一次进项目
+# 会报「未登记的目录」——看起来像权限 bug，其实只是状态没恢复。
+# 放在 init_db 之后：projects 表要先建出来。
+try:
+    projects_lib.register_existing()
+except Exception:
+    logger.warning("恢复项目登记失败，重新打开项目时会再登记一次", exc_info=True)
+
 
 # ======================
 # 文件目录
@@ -229,6 +241,10 @@ class Message(BaseModel):
     # 不决定回答内容——正文由前端直接渲染，模型不重复讲。
     course_id: str = Field("", max_length=32)
     chapter_id: str = Field("", max_length=32)
+    # 学习沙箱：带上这个 id，整轮对话的文件读写与命令执行都只在那个项目目录里发生。
+    # 不带就是纯答疑（没有文件工具）。它不是「权限开关」，而是「这次工作在哪个根下」——
+    # 权限由 backend/projects.sandbox() 决定：有项目才有写和执行的资格。
+    project_id: int = Field(0, ge=0)
 
 
 class PaperQuestion(BaseModel):
@@ -329,6 +345,27 @@ def _chat_context(message: Message) -> dict:
         raise HTTPException(status_code=400, detail="未知的对话模式。")
     selected_filename = None
     image_path = None
+    project = None
+    # 学习沙箱：带了 project_id，就要求它真的存在、目录还在，而且属于当前这门课。
+    # 校验放在这里（返回响应之前），流式接口才能给出正常的 4xx，
+    # 而不是先 200 建好流、再在流里塞一条错误。
+    if message.project_id:
+        if message.mode != "tutor":
+            raise HTTPException(status_code=400, detail="项目沙箱只在学习模式下可用。")
+        try:
+            project = projects_lib.validate(message.project_id)
+        except projects_lib.ProjectError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if project["course_id"] != (message.course_id or course_lib.DEFAULT_COURSE):
+            raise HTTPException(status_code=400, detail="这个项目不属于当前课程。")
+        # 项目属于某一章。在别的章里对着它对话，验收脚本会对错题——
+        # 与其让他看到一堆莫名其妙的失败，不如直接说清楚回哪一章。
+        if project["chapter_id"] and message.chapter_id and \
+                project["chapter_id"] != message.chapter_id:
+            raise HTTPException(
+                status_code=400,
+                detail="这个项目属于第 %s 章，请回到那一章再打开它。" % project["chapter_id"],
+            )
     # 学习模式必须带着章节进来：没有章节的「导师」会退化成普通问答，
     # 与其让它瞎答，不如在这里直接挡掉，前端能立刻提示。
     if message.mode == "tutor":
@@ -366,6 +403,7 @@ def _chat_context(message: Message) -> dict:
         "filename": selected_filename,
         "image_path": image_path,
         "memory_context": memory_context,
+        "project": project,
     }
 
 
@@ -380,17 +418,23 @@ def _persist_chat(chat_id: int, question: str, result: dict) -> None:
 def chat(message: Message):
     ctx = _chat_context(message)
     try:
-        result = run_agent(
-            message.text, history=ctx["history"], mode=message.mode,
-            filename=ctx["filename"], image_path=ctx["image_path"],
-            memory_context=ctx["memory_context"],
-            allow_writes=message.allow_writes,
-            allow_workspace=message.allow_workspace,
-            allow_code_edit=message.allow_code_edit,
-            allow_command=message.allow_command,
-            allow_desktop=message.allow_desktop,
-            show_thinking=message.show_thinking,
-        )
+        # 切根必须包住整轮运行：工具在执行时才读活动根，提前或延后切换都等于没切。
+        with (projects_lib.sandbox(message.project_id) if message.project_id
+              else contextlib.nullcontext()):
+            result = run_agent(
+                message.text, history=ctx["history"], mode=message.mode,
+                filename=ctx["filename"], image_path=ctx["image_path"],
+                memory_context=ctx["memory_context"],
+                allow_writes=message.allow_writes,
+                allow_workspace=message.allow_workspace,
+                allow_code_edit=message.allow_code_edit,
+                allow_command=message.allow_command,
+                allow_desktop=message.allow_desktop,
+                show_thinking=message.show_thinking,
+                course_id=message.course_id,
+                chapter_id=message.chapter_id,
+                project_id=str(message.project_id or ""),
+            )
         _persist_chat(message.chat_id, message.text, result)
         return result
     except HTTPException:
@@ -417,22 +461,28 @@ def chat_stream(message: Message):
     def event_stream():
         result = None
         try:
-            for event in run_agent_stream(
-                message.text, history=ctx["history"], mode=message.mode,
-                filename=ctx["filename"], image_path=ctx["image_path"],
-                memory_context=ctx["memory_context"],
-                allow_writes=message.allow_writes,
-                allow_workspace=message.allow_workspace,
-                allow_code_edit=message.allow_code_edit,
-                allow_command=message.allow_command,
-                allow_desktop=message.allow_desktop,
-                show_thinking=message.show_thinking,
-                course_id=message.course_id,
-                chapter_id=message.chapter_id,
-            ):
-                if event.get("type") == "done":
-                    result = event
-                yield _sse(event)
+            # 切根放在流里面，不是包住 return StreamingResponse：
+            # 后者在响应对象构造完就退出了 with，真正迭代时活动根已经还原——
+            # 页面看起来正常，但工具全都作用在仓库根上，这是最坏的一种失败。
+            with (projects_lib.sandbox(message.project_id) if message.project_id
+                  else contextlib.nullcontext()):
+                for event in run_agent_stream(
+                    message.text, history=ctx["history"], mode=message.mode,
+                    filename=ctx["filename"], image_path=ctx["image_path"],
+                    memory_context=ctx["memory_context"],
+                    allow_writes=message.allow_writes,
+                    allow_workspace=message.allow_workspace,
+                    allow_code_edit=message.allow_code_edit,
+                    allow_command=message.allow_command,
+                    allow_desktop=message.allow_desktop,
+                    show_thinking=message.show_thinking,
+                    course_id=message.course_id,
+                    chapter_id=message.chapter_id,
+                    project_id=str(message.project_id or ""),
+                ):
+                    if event.get("type") == "done":
+                        result = event
+                    yield _sse(event)
         except Exception:
             logger.exception("流式对话中断 | chat_id=%s", message.chat_id)
             yield _sse({"type": "error", "message": "流式对话中断，请重试。"})
@@ -1327,6 +1377,13 @@ class PlanBuildRequest(BaseModel):
     note: str = Field("", max_length=2000)
 
 
+class ProjectCreateRequest(BaseModel):
+    # 名字是给人看的，只限长度；目录名由后端从它转出来（中文转不出就用章节号兜底）。
+    name: str = Field(..., min_length=1, max_length=40)
+    chapter_id: str = Field("", max_length=32)
+    course_id: str = Field(course_lib.DEFAULT_COURSE, max_length=32)
+
+
 class PlanRescheduleRequest(BaseModel):
     strategy: str = Field("shift", max_length=16)
 
@@ -1495,6 +1552,89 @@ def clear_plan(course_id: str = course_lib.DEFAULT_COURSE):
     不等于要把已经学完的章也忘掉。"""
     delete_plan(course_id)
     return {"message": "排期已清空。"}
+
+
+# ======================
+# 学习沙箱：项目
+# ======================
+#
+# 四个接口对应四个动作：看看有什么 / 建一个 / 跑验收 / 从列表里移除。
+# 没有「删除项目」：删文件的按钮不属于这个页面，见 projects.delete_project 的注释。
+
+@app.get("/projects")
+def get_projects(course_id: str = course_lib.DEFAULT_COURSE, chapter_id: str = ""):
+    try:
+        items = projects_lib.list_for(course_id, chapter_id or None)
+    except Exception:
+        # 旧库没有 projects 表：当成「还没有项目」，页面不能因此打不开
+        logger.warning("读取项目列表失败", exc_info=True)
+        items = []
+    return {
+        "items": items,
+        # 哪些章有验收脚本：前端据此决定要不要显示「跑验收」
+        "checkable": checks_lib.list_chapters(course_id),
+    }
+
+
+@app.post("/projects")
+def create_project(payload: ProjectCreateRequest):
+    try:
+        row = projects_lib.create(payload.name, payload.chapter_id, payload.course_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return projects_lib.decorate(row)
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: int):
+    try:
+        row = projects_lib.validate(project_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    item = projects_lib.decorate(row)
+    item["tree"] = projects_lib.tree(project_id)
+    item["check_available"] = checks_lib.available(row["chapter_id"], row["course_id"])
+    item["brief"] = checks_lib.brief(row["chapter_id"], row["course_id"])
+    return item
+
+
+@app.post("/projects/{project_id}/check")
+def run_project_check(project_id: int):
+    """跑一次验收。结果同时写回项目行，所以列表里能直接看到上次结果。
+
+    「验收没过」返回 200 而不是 4xx：它不是请求错误，是一次成功的检查，
+    结论写在 `ok` 字段里。用 4xx 会让前端把「没通过」渲染成「请求失败」。
+    """
+    try:
+        row = projects_lib.validate(project_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        result = checks_lib.run(row["path"], row["chapter_id"], row["course_id"])
+    except checks_lib.CheckError as exc:
+        # 没有验收脚本是「这章没出验收」，不是用户的错，别写成 500
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    set_project_check(
+        project_id, result["ok"] if result["available"] else None,
+        result.get("passed", 0), result.get("total", 0),
+    )
+    result["project"] = projects_lib.decorate(get_project_row(project_id))
+    return result
+
+
+@app.delete("/projects/{project_id}")
+def remove_project(project_id: int):
+    """只从列表里移除登记，磁盘目录原样保留。
+
+    想真删的话请自己去资源管理器删——这个页面不该有一个「删掉我写了三小时」
+    的按钮，而「清理列表」和「删文件」长得几乎一样。
+    """
+    try:
+        row = projects_lib.validate(project_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    delete_project(project_id)
+    return {"message": "已从列表移除，目录还在：%s" % row["path"]}
 
 
 if os.path.isdir(FRONTEND_DIR):

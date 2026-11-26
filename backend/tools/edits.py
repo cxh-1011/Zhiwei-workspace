@@ -71,8 +71,13 @@ def _budget_error(state: dict, rel: str, size: int) -> str:
 # ---------------------------------------------------------------- 备份
 
 def backup_root() -> str:
-    """备份目录的绝对路径。用函数而不是常量，便于测试指向临时工作区。"""
-    return os.path.join(_guard.WORKSPACE_ROOT, "backups", "agent-edits")
+    """备份目录的绝对路径，固定挂在**仓库根**下。
+
+    沙箱里活动根是项目目录，但备份不能写进项目：那会在学生的目录里凭空多出
+    `backups/`，而且他一旦删掉就等于删掉了回滚点。用 base_root() 而不是
+    active_root()，就是这条区分。
+    """
+    return os.path.join(_guard.base_root(), "backups", "agent-edits")
 
 
 def _safe_run_id(run_id: str) -> str:
@@ -90,7 +95,7 @@ def _backup_file(run_id: str, target: str, rel: str, seq: int) -> str:
         flat = stem[:110] + "_" + hashlib.sha1(rel.encode("utf-8")).hexdigest()[:8] + ext
     dest = os.path.join(root, "%03d__%s" % (seq, flat))
     shutil.copy2(target, dest)
-    return _guard.display(os.path.relpath(dest, _guard.WORKSPACE_ROOT))
+    return _guard.display(os.path.relpath(dest, _guard.base_root()))
 
 
 # ---------------------------------------------------------------- 文本与 diff
@@ -167,7 +172,7 @@ def _apply_write(run_id: str, rel: str, target: str, old_text: str, new_text: st
     except OSError as exc:
         if backup_rel:
             try:
-                shutil.copy2(os.path.join(_guard.WORKSPACE_ROOT, backup_rel), target)
+                shutil.copy2(os.path.join(_guard.base_root(), backup_rel), target)
             except OSError:
                 pass
         return ToolResult(False, "", error="写入失败：%s" % exc)
@@ -426,7 +431,7 @@ def restore_edits(steps: list[dict]) -> dict:
         if not backup_rel:
             skipped.append({"path": rel, "reason": "没有备份记录（可能是早期版本）"})
             continue
-        backup_abs = os.path.realpath(os.path.join(_guard.WORKSPACE_ROOT, backup_rel))
+        backup_abs = os.path.realpath(os.path.join(_guard.base_root(), backup_rel))
         if not backup_abs.startswith(root + os.sep) or not os.path.isfile(backup_abs):
             skipped.append({"path": rel, "reason": "备份文件不存在或不在备份目录内"})
             continue

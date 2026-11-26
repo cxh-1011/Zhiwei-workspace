@@ -18,7 +18,6 @@ from ._guard import (
     MAX_LINE_CHARS,
     MAX_SCAN_BYTES,
     SKIP_SUFFIXES,
-    WORKSPACE_ROOT,
     display as _display,
     human_size as _human,
     is_blocked as _is_blocked,

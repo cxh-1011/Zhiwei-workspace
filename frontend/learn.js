@@ -14,6 +14,11 @@ const state = {
   diagInfo: null,
   diagResult: null,
   plan: null,
+  // 这一章的项目列表（/projects?chapter_id=）。对话框上的 project_id 来自 activeProject，
+  // 切章就清空——不然在第 10 章带着第 11 章的项目说话，验收脚本会对错题。
+  projects: [],
+  activeProject: null,
+  checkResult: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -339,6 +344,12 @@ async function openChapter(chapterId) {
     renderToc();
     renderTutorHead();
     await ensureChat(chapterId, payload.chapter);
+    // 项目列表失败不该让整章打不开：它只是章节页上的一块，正文更重要。
+    // 失败时把 check_available 定成 false，否则卡片会一直停在「正在确认…」。
+    await loadProjects(chapterId).catch(() => {
+      if (state.chapter) state.chapter.check_available = false;
+      renderTutorHead();
+    });
   } catch (error) {
     el('readerInner').innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -398,6 +409,7 @@ function renderChapter(payload) {
     <div id="skipGateHost">${skipHtml}</div>
     <article class="prose">${renderMarkdown(payload.markdown)}</article>
     ${renderQuiz(payload.quiz)}
+    ${projectCardHtml()}
     <div class="reader-actions">
       <button class="btn" id="prevBtn" ${payload.prev ? '' : 'disabled'}>← 上一章</button>
       <button class="btn primary ${done ? 'done' : ''}" id="doneBtn">
@@ -412,6 +424,7 @@ function renderChapter(payload) {
   el('nextBtn').addEventListener('click', () => payload.next && openChapter(payload.next));
   el('doneBtn').addEventListener('click', () => toggleDone(c));
   bindQuiz();
+  bindProjectCard();
   el('reader').scrollTop = 0;
 }
 
@@ -1192,13 +1205,284 @@ async function clearPlan() {
   }
 }
 
+/* ---------------- 项目沙箱 ---------------- */
+
+/* 章节页底部的项目卡。
+
+   它不是「文件管理器」：只做四件事——看到有哪些项目、建一个、切到某一个、
+   跑一次验收。真正的写代码在导师对话里发生（导师带 project_id 进来，
+   工具就只能在这个目录里动）。
+
+   为什么验收结果要贴在卡片里而不是弹窗：学生改一轮代码就会跑一次验收，
+   弹窗关起来还得再点开；贴在行里，上一轮的失败项和这一轮的能直接对比。 */
+
+function projectCardHtml() {
+  const list = state.projects || [];
+  const active = state.activeProject;
+  // undefined = 还没从 /projects 拿到 checkable，别在这时候断言「没有验收脚本」
+  const checkable = state.chapter ? state.chapter.check_available : undefined;
+  const rows = list.length
+    ? list.map((item) => {
+      const on = active && active.id === item.id;
+      const cls = item.check_ok === true ? 'ok' : (item.check_ok === false ? 'bad' : 'none');
+      const detail = state.checkResult && state.checkResult.id === item.id
+        ? checkDetailHtml(state.checkResult.result) : '';
+      return `<div class="proj-item ${on ? 'on' : ''} ${item.exists ? '' : 'gone'}" data-project="${item.id}">
+        <div class="proj-line">
+          <button class="proj-name" data-open="${item.id}" title="把导师切到这个项目">${escapeHtml(item.name)}</button>
+          <span class="proj-state ${cls}">${escapeHtml(item.check_label)}</span>
+          <button class="proj-act" data-check="${item.id}" ${item.exists ? '' : 'disabled'}>跑验收</button>
+          <button class="proj-act danger" data-remove="${item.id}" title="只从列表移除，磁盘目录保留">移除</button>
+        </div>
+        <div class="proj-meta">
+          <code>${escapeHtml(item.shown_path)}</code>
+          ${on ? '<span class="proj-on">导师已切到这个项目</span>' : ''}
+          ${item.exists ? '' : '<span class="proj-gone">目录不在了</span>'}
+        </div>
+        ${detail}
+      </div>`;
+    }).join('')
+    : `<p class="proj-empty">还没有项目。新建一个空目录，导师就能在里面帮你写、帮你跑——
+        它看不到这个目录之外的任何文件。</p>`;
+
+  return `<section class="proj" id="projCard">
+    <div class="proj-head">
+      <b>这一章的项目</b>
+      <small>${checkable === undefined ? '正在确认这一章有没有验收脚本…'
+        : (checkable ? '这一章有验收脚本，写完点「跑验收」会真的执行你的代码'
+          : '这一章没有自动验收，靠跑起来看输出')}</small>
+    </div>
+    <div class="proj-list" id="projList">${rows}</div>
+    <div class="proj-new">
+      <input id="projName" maxlength="40" placeholder="给项目起个名，例如 react-parse">
+      <button id="projCreate">新建项目</button>
+      <span class="hint" id="projHint"></span>
+    </div>
+  </section>`;
+}
+
+/* 验收结果：过了就一行绿的，没过逐条列出。
+   失败项的 detail 是验收脚本写的「应该是什么、你写成了什么」，
+   直接原样显示——改写它只会丢掉最有用的一半信息。 */
+function checkDetailHtml(result) {
+  if (!result) return '';
+  if (result.error) {
+    return `<div class="proj-check bad"><b>跑不起来</b><pre>${escapeHtml(result.error)}</pre></div>`;
+  }
+  // 同一个根因（比如函数返回类型就不对）会让四条检查报同一句话。
+  // 那句话只印一次，后面标「同上」——否则一屏四条一样的报错，看不出其实是同一个问题。
+  let lastDetail = '';
+  const rows = (result.items || []).map((item) => {
+    let detail = item.detail || '';
+    if (detail && detail === lastDetail) detail = '同上';
+    else if (detail) lastDetail = detail;
+    return `<li class="${item.ok ? 'ok' : 'bad'}">
+      <span>${item.ok ? '✓' : '✗'}</span>
+      <span>${escapeHtml(item.name)}${detail ? `<em>${escapeHtml(detail)}</em>` : ''}</span>
+    </li>`;
+  }).join('');
+  const head = result.ok
+    ? `验收通过 ${result.passed}/${result.total}（${Math.round((result.elapsed_ms || 0) / 100) / 10}s）`
+    : `验收没过 ${result.passed}/${result.total}`;
+  return `<div class="proj-check ${result.ok ? 'ok' : 'bad'}">
+    <b>${escapeHtml(head)}</b><ul>${rows}</ul>
+    ${result.stdout && !result.ok ? `<details><summary>你的程序输出</summary><pre>${escapeHtml(result.stdout)}</pre></details>` : ''}
+  </div>`;
+}
+
+/* 记住「这一章上次在用哪个项目」。
+
+   不记的话，刷新一次导师就静默失去文件能力：用户接着问「改一下 main.py」，
+   导师会说它看不到文件，而页面上项目卡片明明还在。按章分开存，
+   换章不会串。 */
+function rememberProject(chapterId, id) {
+  const key = `zh_w_proj_${chapterId || ''}`;
+  if (id) sessionStorage.setItem(key, String(id));
+  else sessionStorage.removeItem(key);
+}
+
+function restoreProject(chapterId) {
+  const key = `zh_w_proj_${chapterId || ''}`;
+  const saved = Number(sessionStorage.getItem(key) || 0);
+  if (!saved) return null;
+  const hit = (state.projects || []).find((item) => item.id === saved);
+  if (!hit || !hit.exists) {
+    // 目录被删了：把记忆清掉，别每次进这一章都试一次
+    if (!hit) sessionStorage.removeItem(key);
+    return null;
+  }
+  return hit;
+}
+
+function activeProjectId() {
+  const project = state.activeProject;
+  if (!project) return 0;
+  // 切了章但没清 activeProject 时不要带上去：接口会 400，用户看到的是
+  // 「这个项目属于第 X 章」，而他只是换了章。
+  const chapter = state.chapter && state.chapter.chapter;
+  if (chapter && project.chapter_id && project.chapter_id !== chapter.id) return 0;
+  return project.id;
+}
+
+async function loadProjects(chapterId) {
+  const payload = await api(`/projects?chapter_id=${encodeURIComponent(chapterId)}`);
+  state.projects = payload.items || [];
+  state.chapter.check_available = (payload.checkable || []).includes(chapterId);
+  // 之前切到的项目如果已经不在这一章了，就清掉，免得导师继续对着它说话
+  if (state.activeProject && state.activeProject.chapter_id !== chapterId) {
+    state.activeProject = null;
+    state.checkResult = null;
+  }
+  if (!state.activeProject) state.activeProject = restoreProject(chapterId);
+  const card = el('projCard');
+  if (card) card.outerHTML = projectCardHtml();
+  bindProjectCard();
+  renderTutorHead();
+}
+
+function bindProjectCard() {
+  const card = el('projCard');
+  if (!card) return;
+  card.querySelectorAll('[data-open]').forEach((btn) => {
+    btn.addEventListener('click', () => selectProject(Number(btn.dataset.open)));
+  });
+  card.querySelectorAll('[data-check]').forEach((btn) => {
+    btn.addEventListener('click', () => runProjectCheck(Number(btn.dataset.check)));
+  });
+  card.querySelectorAll('[data-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => removeProject(Number(btn.dataset.remove)));
+  });
+  // 重画列表时按钮节点还在，直接再 bind 会叠加监听器：点一次建出两个项目。
+  // 用 cloneNode 换一个干净节点，比记「绑过没有」可靠。
+  const oldCreate = el('projCreate');
+  if (oldCreate) {
+    const create = oldCreate.cloneNode(true);
+    oldCreate.replaceWith(create);
+    create.addEventListener('click', createProject);
+  }
+  const oldName = el('projName');
+  if (oldName) {
+    const name = oldName.cloneNode(true);
+    oldName.replaceWith(name);
+    name.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); createProject(); }
+    });
+  }
+}
+
+function selectProject(id) {
+  const project = (state.projects || []).find((item) => item.id === id);
+  if (!project) return;
+  if (!project.exists) {
+    el('projHint').textContent = '这个目录不在了，先新建一个吧。';
+    return;
+  }
+  // 再点一次取消：切回「不挂项目」的纯答疑，不需要另做一个按钮
+  state.activeProject = state.activeProject && state.activeProject.id === id ? null : project;
+  state.checkResult = null;
+  rememberProject(state.chapterId, state.activeProject ? state.activeProject.id : 0);
+  renderProjectList();
+  renderTutorHead();
+  el('projHint').textContent = state.activeProject
+    ? '导师现在只在这个目录里工作。问它「下一步该写什么」就能开始。' : '已取消项目，导师回到纯答疑。';
+}
+
+function renderProjectList() {
+  const host = el('projList');
+  if (!host) return;
+  // 只重画列表，不动输入框：整块替换会把用户正在输入的项目名清掉
+  const scratch = document.createElement('div');
+  scratch.innerHTML = projectCardHtml();
+  host.innerHTML = scratch.querySelector('#projList').innerHTML;
+  bindProjectCard();
+}
+
+async function createProject() {
+  const input = el('projName');
+  const name = (input && input.value || '').trim();
+  const hint = el('projHint');
+  if (!name) {
+    hint.textContent = '先起个名字，目录名会从它生成。';
+    return;
+  }
+  const button = el('projCreate');
+  button.disabled = true;
+  try {
+    const created = await api('/projects', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        chapter_id: state.chapterId,
+        course_id: (state.course && state.course.id) || 'agent-dev',
+      }),
+    });
+    if (input) input.value = '';
+    state.projects = [created, ...(state.projects || [])];
+    // 新建就切过去：他要的是「马上开始写」，再点一下「打开」是多余的一步
+    state.activeProject = created;
+    state.checkResult = null;
+    rememberProject(state.chapterId, created.id);
+    renderProjectList();
+    renderTutorHead();
+    hint.textContent = `建好了：${created.shown_path}`;
+  } catch (error) {
+    hint.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runProjectCheck(id) {
+  const hint = el('projHint');
+  const row = (state.projects || []).find((item) => item.id === id);
+  hint.textContent = row ? `正在跑「${row.name}」的验收…` : '正在跑验收…';
+  try {
+    const result = await api(`/projects/${id}/check`, { method: 'POST' });
+    state.checkResult = { id, result };
+    // 服务端把结果写回了项目行，直接用返回的那份，别自己拼
+    if (result.project) {
+      state.projects = (state.projects || []).map(
+        (item) => (item.id === id ? { ...item, ...result.project } : item));
+    }
+    renderProjectList();
+    hint.textContent = result.ok ? '验收通过。' : '没过，下面写了哪一条不满足。';
+  } catch (error) {
+    state.checkResult = { id, result: { error: error.message } };
+    renderProjectList();
+    hint.textContent = '';
+  }
+}
+
+async function removeProject(id) {
+  const row = (state.projects || []).find((item) => item.id === id);
+  if (!row) return;
+  // 说清「只移除登记」再动手：这个按钮旁边就是项目名，点错了人会以为文件没了
+  if (!window.confirm(`从列表移除「${row.name}」？\n\n磁盘上的目录会保留：${row.shown_path}`)) return;
+  try {
+    await api(`/projects/${id}`, { method: 'DELETE' });
+    state.projects = (state.projects || []).filter((item) => item.id !== id);
+    if (state.activeProject && state.activeProject.id === id) {
+      state.activeProject = null;
+      rememberProject(state.chapterId, 0);
+    }
+    if (state.checkResult && state.checkResult.id === id) state.checkResult = null;
+    renderProjectList();
+    renderTutorHead();
+    el('projHint').textContent = '已从列表移除，目录还在。';
+  } catch (error) {
+    el('projHint').textContent = error.message;
+  }
+}
+
 /* ---------------- 导师 ---------------- */
 
 function renderTutorHead() {
   const c = state.chapter && state.chapter.chapter;
-  el('tutorWhere').textContent = c
-    ? `正在看第 ${c.no} 章 · ${c.title}`
-    : '未选择章节';
+  const where = c ? `正在看第 ${c.no} 章 · ${c.title}` : '未选择章节';
+  // 带上项目名：用户得知道自己问的这句话，导师是在哪个目录里动手的
+  const project = state.activeProject;
+  el('tutorWhere').textContent = project ? `${where} · 项目 ${project.name}` : where;
+  el('tutor').classList.toggle('with-project', Boolean(project));
 
   const quick = [
     { label: '这一章到底在讲什么', text: '用三句话说清这一章到底想让我记住什么。不要复述正文。' },
@@ -1284,6 +1568,9 @@ async function askTutor(question) {
         mode: 'tutor',
         course_id: state.course.id || 'agent-dev',
         chapter_id: state.chapterId,
+        // 只在「当前章的项目」上带：接口会校验项目归属哪一章，
+        // 但前端也别指望它兜底——带错了会被 400，用户只看到一句莫名其妙的错。
+        project_id: activeProjectId(),
       }),
     });
     if (response.status === 401) { location.href = '/'; return; }

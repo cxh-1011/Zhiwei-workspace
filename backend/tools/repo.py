@@ -13,10 +13,10 @@ import os
 import re
 import subprocess
 
+from . import _guard
 from ._guard import (
     MAX_SCAN_BYTES,
     SKIP_SUFFIXES,
-    WORKSPACE_ROOT,
     display,
     is_blocked,
     rel_inside,
@@ -52,7 +52,8 @@ def _git(args: list[str], max_chars: int = MAX_GIT_CHARS):
             # core.quotepath=false：否则中文文件名会被转成 \344\270\211 这种八进制，
             # 模型看到的就是一堆转义码，等于没列出文件名。
             ["git", "-c", "core.quotepath=false"] + list(args),
-            cwd=WORKSPACE_ROOT,
+            # 用活动根而不是导入时的常量：沙箱里 git 要看的是项目目录
+            cwd=_guard.active_root(),
             shell=False,
             capture_output=True,
             text=True,

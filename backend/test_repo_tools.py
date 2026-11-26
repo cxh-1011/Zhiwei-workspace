@@ -81,18 +81,21 @@ check("包含行数信息", re.search(r"\d+ 行", r.content) is not None)
 check("不乱入被拉黑的目录", ".venv" not in r.content and "__pycache__" not in r.content)
 check("返回结构完整", {"path", "files", "shown"} <= set(r.data), sorted(r.data))
 
-# 8000 而不是默认 4000：地图在字符预算紧张时会逐级折叠每个文件的符号
-# （12 → 8 → 6 → 4）。仓库变大后同样的预算要喂更多文件，6000 已经不够用了
-# （实测 agent.py 只剩前 6 个符号，run_agent_stream 被折掉）。这里要验的是
-# 「符号提取对不对」，不该被整仓预算的降级策略干扰。
+# 整仓地图只验「有哪些文件」：字符预算固定上限 8000，文件一多就必须逐级折叠
+# 每个文件的符号（12 → 8 → 6 → 4），具体某个函数掉不掉出去取决于仓库大小，
+# 拿它当断言等于在测「仓库现在有多大」。符号提取对不对，用单文件地图验。
 r_all = invoke("repo_map", {"path": ".", "max_chars": 8000})
 check("整仓地图包含 agent.py", "agent.py" in r_all.content)
-check("整仓地图包含 run_agent_stream", "run_agent_stream" in r_all.content, r_all.content[:200])
 check("整仓地图列出前端目录", "frontend/" in r_all.content, r_all.content[-160:])
 check("整仓地图列出 app.js", "app.js" in r_all.content)
-agent_row = [line for line in r_all.content.splitlines() if "agent.py" in line]
-check("agent.py 带顶层符号", bool(agent_row) and "run_agent_stream" in agent_row[0], agent_row[:1])
 check("整仓地图不含 .git 内部", ".git/" not in r_all.content)
+
+# 单文件地图不受整仓预算拖累，能看到 12 个符号，够验「提取的是顶层定义」
+r_one = invoke("repo_map", {"path": "backend/agent.py"})
+check("单文件地图提取到 run_agent_stream", "run_agent_stream" in r_one.content, r_one.content[:200])
+agent_row = [line for line in r_one.content.splitlines()
+             if "agent.py" in line and "行" in line and not line.startswith("项目地图")]
+check("agent.py 带顶层符号", bool(agent_row) and "run_agent_stream" in agent_row[0], agent_row[:1])
 
 # 地图负责「有哪些文件」，具体符号靠 grep_code 兜底，两者配合才算完整
 grep_send = invoke("grep_code", {"pattern": "function sendMessage", "path": "frontend/app.js"})

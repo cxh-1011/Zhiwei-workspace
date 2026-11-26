@@ -239,6 +239,33 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_plan_slots_course ON plan_slots(course_id, day, seq)"
     )
 
+    # 学习沙箱的项目：一行对应磁盘上的一个目录。目录才是真相，这张表只记
+    # 「谁建的、属于哪一章、上次验收结果」。用户在资源管理器里把目录删了，
+    # 表还在——列表里标成「目录不见了」，而不是假装项目还在。
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS projects(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        check_ok INTEGER,
+        check_passed INTEGER NOT NULL DEFAULT 0,
+        check_total INTEGER NOT NULL DEFAULT 0,
+        checked_at TEXT DEFAULT '',
+        opened_at TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_projects_chapter ON projects(course_id, chapter_id)"
+    )
+    # path 唯一：同一个目录不能被登记成两个项目，否则「打开哪个」会取决于查询顺序。
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_path ON projects(path)"
+    )
+
 
 
     cursor.execute("""
@@ -1188,6 +1215,116 @@ def delete_plan(course_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM plan_slots WHERE course_id=?", (course_id,))
     conn.execute("DELETE FROM plan_settings WHERE course_id=?", (course_id,))
+    conn.commit()
+    conn.close()
+
+
+# ======================
+# 学习沙箱项目
+# ======================
+
+_PROJECT_COLUMNS = (
+    "id, course_id, chapter_id, slug, name, path, "
+    "check_ok, check_passed, check_total, checked_at, opened_at, created_at"
+)
+
+
+def _project_row(row):
+    if not row:
+        return None
+    return {
+        "id": row[0], "course_id": row[1], "chapter_id": row[2],
+        "slug": row[3], "name": row[4], "path": row[5],
+        # 三态：None=还没跑过验收，0=跑过没过，1=跑过通过。
+        # 用 None 而不是 0，是为了让界面能区分「没验过」和「验了没过」。
+        "check_ok": None if row[6] is None else bool(row[6]),
+        "check_passed": int(row[7] or 0), "check_total": int(row[8] or 0),
+        "checked_at": row[9] or "", "opened_at": row[10] or "",
+        "created_at": row[11],
+    }
+
+
+def add_project(course_id, chapter_id, slug, name, path):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO projects(course_id,chapter_id,slug,name,path,checked_at,opened_at) "
+        "VALUES(?,?,?,?,?,'','')",
+        (course_id, chapter_id or "", slug, name, path),
+    )
+    conn.commit()
+    project_id = cursor.lastrowid
+    conn.close()
+    return get_project(project_id)
+
+
+def get_project(project_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT %s FROM projects WHERE id=?" % _PROJECT_COLUMNS, (int(project_id),)
+    ).fetchone()
+    conn.close()
+    return _project_row(row)
+
+
+def get_project_by_path(path):
+    """同一个目录重复登记会撞唯一索引，这里用来做「已存在就返回旧行」的判断。"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT %s FROM projects WHERE path=?" % _PROJECT_COLUMNS, (str(path),)
+    ).fetchone()
+    conn.close()
+    return _project_row(row)
+
+
+def list_projects(course_id=None, chapter_id=None):
+    sql = "SELECT %s FROM projects" % _PROJECT_COLUMNS
+    where, params = [], []
+    if course_id:
+        where.append("course_id=?")
+        params.append(course_id)
+    if chapter_id:
+        where.append("chapter_id=?")
+        params.append(chapter_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC"
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [_project_row(row) for row in rows]
+
+
+def touch_project(project_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE projects SET opened_at=CURRENT_TIMESTAMP WHERE id=?", (int(project_id),)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_project_check(project_id, ok, passed, total):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE projects SET check_ok=?, check_passed=?, check_total=?, "
+        "checked_at=CURRENT_TIMESTAMP WHERE id=?",
+        (None if ok is None else (1 if ok else 0), int(passed or 0), int(total or 0),
+         int(project_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_project(project_id):
+    """只删登记，不删磁盘目录。
+
+    删目录是不可逆的，而这个功能的用户是刚学写代码的人——把「清理列表」
+    和「删掉我写了三小时的项目」合成一个按钮，早晚会有人手滑。
+    真要删文件请在资源管理器里自己删，列表会标成「目录不见了」。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM projects WHERE id=?", (int(project_id),))
     conn.commit()
     conn.close()
 

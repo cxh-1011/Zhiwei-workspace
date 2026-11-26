@@ -4,15 +4,23 @@
 否则很容易出现「读被拦了、写没拦」这种漏洞。以后新增工具只 import 这里，
 不要自己再写一份 realpath 校验。
 
-四类规则：
+五类规则：
 1. 路径：只接受「相对工作区」的路径，绝对路径与盘符路径一律拒绝；
-   解析后（realpath，含符号链接）必须落在 AGENT_WORKSPACE 之内。
-2. 红线：配置、密钥、数据库、依赖、备份、上传数据一律不可访问，
+   解析后（realpath，含符号链接）必须落在**当前活动根**之内。
+2. 根：活动根不是常量。代码仓库是默认根，学习沙箱创建的每个项目目录
+   都是运行时登记进来的根（`register_root`）。切换只能用 `use_root`，
+   而且传进去的目录必须已经登记过——否则等于把「切根」变成「任意目录可读写」。
+3. 红线：配置、密钥、数据库、依赖、备份、上传数据、其它项目一律不可访问，
    并且要说清命中的是哪一类，让模型知道「换个路径再试」没有意义。
-3. 二进制：含 NUL 或解码失败的文件不按文本处理，避免把乱码塞进上下文。
-4. 体积：单个文件读取、单次写入都有硬上限，超限提示改用分片或局部修改。
+4. 二进制：含 NUL 或解码失败的文件不按文本处理，避免把乱码塞进上下文。
+5. 体积：单个文件读取、单次写入都有硬上限，超限提示改用分片或局部修改。
+
+为什么要 contextvar 而不是给每个函数加 root 参数：`resolve()` 有十几处调用点，
+漏改一处的后果是**静默回落到仓库根**——学生项目里写文件写到了仓库里，
+而且不报错。活动根只在一个地方设置、所有调用点自动跟随，才是这类 bug 的正解。
 """
 
+import contextvars
 import os
 import re
 
@@ -20,8 +28,75 @@ _DEFAULT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 )
 
-# 允许用 AGENT_WORKSPACE 指向别的目录（例如专门的代码工作区）。
+# 基础根：代码仓库本身。允许用 AGENT_WORKSPACE 指向别的目录（例如专门的代码工作区）。
+# 这个变量仍然可以被测试直接改（现有测试都这么干），但它现在只决定「没有活动根时用哪个」，
+# 以及「备份往哪写」，不再直接参与每次解析。
 WORKSPACE_ROOT = os.path.realpath(os.getenv("AGENT_WORKSPACE") or _DEFAULT_ROOT)
+
+# 运行时登记过的额外根（学习沙箱的项目目录）。只有登记过的目录才能被切换成活动根。
+_EXTRA_ROOTS: dict[str, str] = {}
+
+# 当前活动根。None 表示用 WORKSPACE_ROOT。
+_ACTIVE_ROOT: contextvars.ContextVar = contextvars.ContextVar("ai_active_root", default=None)
+
+
+def base_root() -> str:
+    """仓库根。备份目录固定写在这里：项目目录里出现 `backups/` 会污染学生项目。"""
+    return WORKSPACE_ROOT
+
+
+def active_root() -> str:
+    """当前解析用的根。默认是仓库，沙箱里是那个项目目录。"""
+    current = _ACTIVE_ROOT.get()
+    return os.path.realpath(current) if current else WORKSPACE_ROOT
+
+
+def register_root(path: str) -> str:
+    """登记一个可以当活动根使用的目录，返回规范化后的绝对路径。
+
+    登记不是「信任」：目录仍然受红线清单约束（比如项目里不能叫 .git）。
+    它的作用是让 `use_root` 只认应用自己创建/打开过的项目，
+    而不是「模型说切到 C:/ 就切到 C:/」。
+    """
+    real = os.path.realpath(str(path or ""))
+    if not os.path.isdir(real):
+        raise ValueError("要登记的目录不存在：%s" % real)
+    _EXTRA_ROOTS[os.path.normcase(real)] = real
+    return real
+
+
+def unregister_root(path: str) -> None:
+    _EXTRA_ROOTS.pop(os.path.normcase(os.path.realpath(str(path or ""))), None)
+
+
+def registered_roots() -> list[str]:
+    return sorted(_EXTRA_ROOTS.values())
+
+
+def is_registered_root(path: str) -> bool:
+    real = os.path.realpath(str(path or ""))
+    if os.path.normcase(real) == os.path.normcase(WORKSPACE_ROOT):
+        return True
+    return os.path.normcase(real) in _EXTRA_ROOTS
+
+
+def use_root(path: str):
+    """把活动根切成 `path`，返回 token，用于 finally 里 reset。
+
+    未登记的目录直接拒绝。这是「切根」唯一的入口，别在别处直接 set contextvar。
+    """
+    real = os.path.realpath(str(path or ""))
+    if not is_registered_root(real):
+        raise ValueError("拒绝切换到未登记的目录：%s" % real)
+    return _ACTIVE_ROOT.set(real)
+
+
+def reset_root(token) -> None:
+    try:
+        _ACTIVE_ROOT.reset(token)
+    except (ValueError, LookupError):
+        # token 属于别的 context（比如跨线程用了）：退化成清空，不要让它把整轮请求炸掉
+        _ACTIVE_ROOT.set(None)
 
 # ---------------------------------------------------------------- 红线清单
 # 三类红线分开写，是为了报错时能说清「为什么不行」，而不是一句笼统的「不可访问」。
@@ -31,6 +106,10 @@ BLOCKED_DIRS = {
     ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
     ".deliverables", "backups", "uploads", "logs", ".idea", ".vscode",
     ".ssh", ".aws", ".gnupg", ".workbuddy",
+    # 学习沙箱的项目目录：从仓库根看过去必须不可见，否则「打开 A 项目」时
+    # 能顺手读到 B 项目（以及别人的答案）。切进项目后相对路径里没有这一层，
+    # 所以不影响项目内部的正常读写。
+    "projects",
 }
 
 _DIR_REASONS = {
@@ -50,6 +129,7 @@ _DIR_REASONS = {
     ".aws": "云服务凭证目录",
     ".gnupg": "GPG 密钥目录",
     ".workbuddy": "助手运行数据",
+    "projects": "项目沙箱目录（需在某个项目内访问）",
 }
 
 # 精确文件名命中即不可访问：私钥与凭证
@@ -157,17 +237,19 @@ def is_blocked(rel_path: str) -> bool:
 
 
 def rel_inside(path: str) -> str:
-    """把绝对路径转成相对工作区的路径；越界直接抛 ValueError。
+    """把绝对路径转成相对**活动根**的路径；越界直接抛 ValueError。
 
     边界判断用 normcase（Windows 下大小写不敏感），但返回的路径保留原始大小写，
     否则显示出来会变成 readme.md 这种小写形式。
     """
-    root = WORKSPACE_ROOT
+    root = active_root()
     target = os.path.realpath(path)
     root_key = os.path.normcase(root)
     target_key = os.path.normcase(target)
     if target_key != root_key and not target_key.startswith(root_key + os.sep):
-        raise ValueError("路径越界：只能访问工作区内的文件")
+        # 报错里带上当前根：沙箱里读仓库文件时，模型需要知道「你现在在项目里」，
+        # 否则它会一直换路径重试。
+        raise ValueError("路径越界：只能访问当前工作区（%s）内的文件" % display(os.path.basename(root) or root))
     return os.path.relpath(target, root)
 
 
@@ -183,7 +265,8 @@ def resolve(rel: str, write: bool = False) -> str:
     if os.path.isabs(rel) or re.match(r"^[A-Za-z]:", rel):
         raise ValueError("请使用相对工作区的路径，不要用绝对路径")
 
-    resolved = os.path.realpath(os.path.join(WORKSPACE_ROOT, rel))
+    root = active_root()
+    resolved = os.path.realpath(os.path.join(root, rel))
     inside = rel_inside(resolved)
     reason = block_reason(inside)
     if reason:
@@ -197,7 +280,7 @@ def resolve(rel: str, write: bool = False) -> str:
     if write:
         if os.path.isdir(resolved):
             raise ValueError("目标是一个目录，不能写入：%s" % rel)
-        parent = os.path.dirname(resolved) or WORKSPACE_ROOT
+        parent = os.path.dirname(resolved) or root
         if not os.path.isdir(parent):
             raise ValueError("上级目录不存在：%s" % rel)
     return resolved

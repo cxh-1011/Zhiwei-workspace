@@ -11,6 +11,7 @@ sys.path.insert(0, BACKEND)
 os.chdir(BACKEND)
 
 import tools  # noqa: E402
+from tools import _guard  # noqa: E402
 from tools import get_tool  # noqa: E402
 from tools import workspace as ws  # noqa: E402
 
@@ -23,8 +24,8 @@ def check(label, cond, detail=""):
 
 
 print("== 工作区根目录 ==")
-print("   WORKSPACE_ROOT =", ws.WORKSPACE_ROOT)
-check("根目录存在", os.path.isdir(ws.WORKSPACE_ROOT))
+print("   WORKSPACE_ROOT =", _guard.active_root())
+check("根目录存在", os.path.isdir(_guard.active_root()))
 
 print("== 1. 工具注册 ==")
 names = tools.tool_names()

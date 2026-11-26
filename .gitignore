@@ -26,6 +26,9 @@ __pycache__/
 
 # Backups and editor files
 backups/
+
+# 学习沙箱里学生写的项目：是本机数据，不进仓库
+projects/
 frontend/.well-known/acme-challenge/*
 .vscode/
 .idea/

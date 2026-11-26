@@ -20,6 +20,7 @@ POSIX 用 `killpg`，因为 `python -m pytest` 会拉起子进程，只杀父进
 """
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -166,6 +167,29 @@ def _redline_in_tokens(tokens: list[str]) -> str:
     return ""
 
 
+def _escapes_sandbox(tokens: list[str]) -> str:
+    """沙箱里拒掉「跳出项目目录」的参数。
+
+    为什么必须有这一条：`cat`、`head`、`type` 在白名单里是免审批直接跑的，
+    而 `cat ../agent.py` 照样能读到项目外面——红线清单只认得 .env、*.db 这些
+    文件名，不认得「路径往上走」。沙箱的承诺是「只看得到这个目录」，
+    那就得把 `..` 和绝对路径一起挡住，否则这个承诺是假的。
+
+    只在沙箱里生效（活动根 ≠ 仓库根）：开发模式下跑 `python D:/tools/x.py`
+    是正常需求，不该被这条误伤。
+    """
+    if os.path.normcase(_guard.active_root()) == os.path.normcase(_guard.base_root()):
+        return ""
+    for token in tokens:
+        if os.path.isabs(token) or re.match(r"^[A-Za-z]:", token):
+            return ("沙箱里不接受绝对路径：%s。请用相对项目目录的路径。" % token)
+        parts = token.replace("\\", "/").split("/")
+        if ".." in parts:
+            return ("沙箱里不能用 .. 跳出项目目录：%s。项目外的文件一律不可访问，"
+                    "确实需要里面的内容请让用户直接告诉你。" % token)
+    return ""
+
+
 def classify_command(command: str, cwd: str = ".") -> tuple[str, str]:
     """把命令分成 auto / ask / deny 三档，返回 (档位, 原因)。
 
@@ -190,6 +214,9 @@ def classify_command(command: str, cwd: str = ".") -> tuple[str, str]:
     redline = _redline_in_tokens(tokens)
     if redline:
         return "deny", redline
+    escaping = _escapes_sandbox(tokens)
+    if escaping:
+        return "deny", escaping
 
     exe = _exe_name(tokens[0])
     rest = tokens[1:]

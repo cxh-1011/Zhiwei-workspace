@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 
-from ._guard import WORKSPACE_ROOT
+from . import _guard
 from .base import Tool, ToolResult, register
 
 IS_WINDOWS = sys.platform == "win32"
@@ -40,7 +40,8 @@ MAX_ACTIONS = 40
 # 单次粘贴的文本上限：超过这个长度多半是模型把整篇文章塞进输入框了
 MAX_TYPE_CHARS = 2000
 # 截图落盘目录（不含项目源码，禁止提交）
-SHOT_DIR = os.path.join(WORKSPACE_ROOT, "desktop_shots")
+# 截图固定落在仓库根（而不是活动根）：沙箱里截图不该混进学生项目
+SHOT_DIR = os.path.join(_guard.base_root(), "desktop_shots")
 
 if IS_WINDOWS:
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -317,8 +318,9 @@ def _open_app(args: dict, context: dict) -> ToolResult:
 
     # 工作区内的文件或文件夹允许直接打开（用默认程序），其余一律拒绝：
     # 放行任意路径等于给了「打开任何 exe」的能力。
-    candidate = os.path.realpath(os.path.join(WORKSPACE_ROOT, target))
-    if candidate.startswith(os.path.realpath(WORKSPACE_ROOT) + os.sep) and os.path.exists(candidate):
+    root = _guard.active_root()
+    candidate = os.path.realpath(os.path.join(root, target))
+    if candidate.startswith(os.path.realpath(root) + os.sep) and os.path.exists(candidate):
         if candidate.lower().endswith((".exe", ".bat", ".cmd", ".ps1", ".msi")):
             return ToolResult(False, "", error="出于安全考虑，不能从工作区启动可执行文件")
         try:

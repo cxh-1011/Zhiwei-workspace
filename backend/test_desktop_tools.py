@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import database
 import tools
-from tools import desktop
+from tools import _guard, desktop
 
 PASS = 0
 FAIL = 0
@@ -172,7 +172,7 @@ def test_open_app():
     check("拒绝时列出可用项", "chrome" in (result.error or ""), result.error)
 
     # 工作区里的脚本不能借 open_app 启动：那等于绕过 run_command 的黑名单
-    probe = os.path.join(desktop.WORKSPACE_ROOT, "_probe_desktop.bat")
+    probe = os.path.join(_guard.active_root(), "_probe_desktop.bat")
     with open(probe, "w", encoding="utf-8") as handle:
         handle.write("echo hi")
     try:
