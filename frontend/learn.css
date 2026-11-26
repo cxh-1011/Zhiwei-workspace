@@ -964,6 +964,36 @@ button { cursor: pointer; }
 .proj-head b { color: #2d3340; font-size: 12.5px; font-weight: 600; }
 .proj-head small { color: var(--muted); font-size: 10.5px; line-height: 1.7; }
 
+/* 验收要求：默认收起。展开时按正文的排版渲染，
+   学生不用为了看一眼契约再回去翻 README。 */
+.proj-brief {
+  margin-top: 10px;
+  padding: 0 13px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: #fcfcfe;
+}
+.proj-brief summary {
+  padding: 8px 0;
+  color: #4b5364;
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+.proj-brief summary::-webkit-details-marker { display: none; }
+.proj-brief summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 14px;
+  color: var(--muted-2);
+  transition: transform .15s ease;
+}
+.proj-brief[open] summary::before { transform: rotate(90deg); }
+.proj-brief[open] { padding-bottom: 12px; }
+.proj-brief .prose { font-size: 12px; }
+.proj-brief .prose h2 { font-size: 13px; margin: 4px 0 8px; }
+.proj-brief .prose p, .proj-brief .prose li { line-height: 1.85; }
+
 .proj-list { margin-top: 10px; display: grid; gap: 8px; }
 .proj-empty {
   margin: 10px 0 2px;

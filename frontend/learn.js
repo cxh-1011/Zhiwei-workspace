@@ -1221,6 +1221,15 @@ function projectCardHtml() {
   const active = state.activeProject;
   // undefined = 还没从 /projects 拿到 checkable，别在这时候断言「没有验收脚本」
   const checkable = state.chapter ? state.chapter.check_available : undefined;
+  // 验收要求来自 checks/<章>.md，写进项目 README 的同时也在这里展开一份。
+  // 为什么现在才放进来：33 章都有了验收脚本之后，「这一章到底要交什么」
+  // 不该只藏在 README 里——学生跑验收前就得看见，哪怕还没建项目。
+  const brief = (state.chapter && state.chapter.brief) || '';
+  const briefHtml = brief
+    ? `<details class="proj-brief"><summary>这一章的验收要求</summary>
+         <article class="prose">${renderMarkdown(brief)}</article>
+       </details>`
+    : '';
   const rows = list.length
     ? list.map((item) => {
       const on = active && active.id === item.id;
@@ -1252,6 +1261,7 @@ function projectCardHtml() {
         : (checkable ? '这一章有验收脚本，写完点「跑验收」会真的执行你的代码'
           : '这一章没有自动验收，靠跑起来看输出')}</small>
     </div>
+    ${briefHtml}
     <div class="proj-list" id="projList">${rows}</div>
     <div class="proj-new">
       <input id="projName" maxlength="40" placeholder="给项目起个名，例如 react-parse">
@@ -1328,6 +1338,7 @@ async function loadProjects(chapterId) {
   const payload = await api(`/projects?chapter_id=${encodeURIComponent(chapterId)}`);
   state.projects = payload.items || [];
   state.chapter.check_available = (payload.checkable || []).includes(chapterId);
+  state.chapter.brief = payload.brief || '';
   // 之前切到的项目如果已经不在这一章了，就清掉，免得导师继续对着它说话
   if (state.activeProject && state.activeProject.chapter_id !== chapterId) {
     state.activeProject = null;

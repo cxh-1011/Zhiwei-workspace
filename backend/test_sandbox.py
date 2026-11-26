@@ -194,10 +194,10 @@ def write_module(project, source):
 def test_checks():
     print("[3] 验收执行器")
     check("s4c1 有脚本", checks.available("s4c1", COURSE))
-    check("s1c1 没脚本", not checks.available("s1c1", COURSE))
+    check("不存在的章没脚本", not checks.available("s99c9", COURSE))
     check("脚本清单不含 _kit", "_kit" not in checks.list_chapters(COURSE),
           checks.list_chapters(COURSE))
-    check("清单含四章", {"s3c1", "s4c1", "s5c1", "s8c2"} <= set(checks.list_chapters(COURSE)),
+    check("33 章都有脚本", len(checks.list_chapters(COURSE)) == 33,
           checks.list_chapters(COURSE))
 
     for chapter, good, bad in ((c, GOOD[c], BAD[c]) for c in ("s4c1", "s5c1", "s8c2")):
@@ -253,7 +253,7 @@ def test_checks():
 
     # 缺脚本
     try:
-        checks.run(tool_call["path"], "s1c1")
+        checks.run(tool_call["path"], "s99c9")
         check("缺脚本抛 CheckError", False)
     except checks.CheckError:
         check("缺脚本抛 CheckError", True)
@@ -378,8 +378,11 @@ def test_http():
     api = _client()
     listing = api.get("/projects")
     check("列表 200", listing.status_code == 200, listing.text[:120])
-    check("列表带四个可验收章", set(listing.json()["checkable"]) == {"s3c1", "s4c1", "s5c1", "s8c2"},
+    check("列表返回全部可验收章", set(listing.json()["checkable"]) == set(checks.list_chapters(COURSE)),
           listing.json()["checkable"])
+    brief = api.get("/projects?chapter_id=s8c1").json().get("brief") or ""
+    check("列表带上这一章的验收要求", "extract_test_case" in brief, brief[:60])
+    check("不带章 id 时不返回验收要求", api.get("/projects").json().get("brief") == "")
 
     created = api.post("/projects", json={"name": "接口建的项目", "chapter_id": "s4c1"})
     check("建项目 201/200", created.status_code == 200, created.text[:160])
@@ -403,7 +406,7 @@ def test_http():
     check("列表能看到上次结果", api.get("/projects").json()["items"][0]["check_label"].startswith("验收通过"),
           api.get("/projects").json()["items"][0]["check_label"])
 
-    no_script = api.post("/projects", json={"name": "没脚本的章", "chapter_id": "s1c1"})
+    no_script = api.post("/projects", json={"name": "没脚本的章", "chapter_id": "s99c9"})
     run_no = api.post("/projects/%s/check" % no_script.json()["id"])
     check("没脚本返回 404", run_no.status_code == 404, run_no.text[:120])
 

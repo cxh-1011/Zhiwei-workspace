@@ -1573,6 +1573,9 @@ def get_projects(course_id: str = course_lib.DEFAULT_COURSE, chapter_id: str = "
         "items": items,
         # 哪些章有验收脚本：前端据此决定要不要显示「跑验收」
         "checkable": checks_lib.list_chapters(course_id),
+        # 这一章的验收要求（checks/<章>.md）。放在章级而不是每个项目里：
+        # 同章的项目要求完全一样，重复 33 遍没有意义。没带 chapter_id 时为空。
+        "brief": checks_lib.brief(chapter_id, course_id) if chapter_id else "",
     }
 
 

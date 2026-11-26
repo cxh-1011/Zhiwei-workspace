@@ -18,6 +18,10 @@ import traceback
 # 学生可能给自己的文件起任何名字，按常见顺序找。找不到就说清楚找过哪些。
 DEFAULT_MODULES = ("main", "solution", "app")
 
+# 单个产物文件最多读这么多：学生的输出里塞进一整份日志时，
+# 直接读进内存再正则，比先 stat 再截断省事。
+MAX_TEXT = 40000
+
 
 class Missing(Exception):
     """找不到学生代码 / 找不到要求的函数。消息直接展示给学生看。"""
@@ -75,41 +79,88 @@ def item(items, name, ok, detail=""):
     items.append({"name": name, "ok": bool(ok), "detail": "" if ok else str(detail)[:400]})
 
 
+def read_text(project_dir, filename, hint="", limit=MAX_TEXT):
+    """读项目目录里的一个产物文件。返回 (文本, 错误)。
+
+    找不到时把 `hint`（"这个文件应该放什么"）接在后面——学生最常见的
+    失败是文件名差一个字母，而不是内容写错。
+    """
+    path = os.path.join(project_dir, filename)
+    if not os.path.isfile(path):
+        message = "没找到 %s。" % filename
+        return None, (message + hint) if hint else message
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(limit), ""
+    except OSError as exc:
+        return None, "读不了 %s：%s" % (filename, exc)
+
+
+def read_json(project_dir, filename, hint="", limit=MAX_TEXT):
+    """读一个 JSON 产物。返回 (对象, 错误)。
+
+    错误消息带上行列号：JSON 的报错本来就精确到列，扔掉它等于让学生
+    自己数第几个逗号。
+    """
+    text, error = read_text(project_dir, filename, hint, limit)
+    if text is None:
+        return None, error
+    try:
+        return json.loads(text), ""
+    except ValueError as exc:
+        return None, "%s 不是合法 JSON（%s）。注意不能有结尾逗号、不能用单引号。" % (
+            filename, exc)
+
+
 def finish(items):
     print(json.dumps({"items": items}, ensure_ascii=False))
 
 
-def run(project_dir, cases, names=DEFAULT_MODULES):
+def _collect(items, name, call):
+    """跑一项，把结果（或异常）记成一条。单项失败不影响其它项。"""
+    try:
+        outcome = call()
+        if isinstance(outcome, tuple):
+            ok, detail = outcome
+        else:
+            ok, detail = bool(outcome), ""
+    except Missing as exc:
+        ok, detail = False, str(exc)
+    except Exception:
+        ok, detail = False, "运行时出错：" + _last_line()
+    item(items, name, ok, detail)
+
+
+def run(project_dir, cases, names=DEFAULT_MODULES, extra=(), need_module=True):
     """跑一组检查。
 
     `cases` 是 [(名字, fn)]，fn(module) 返回 (ok, detail) 或 True/False。
     单项里抛异常只记这一项失败——学生某个函数写崩了，不该让其它项也不出结果。
+
+    `extra` 是 [(名字, fn)]，fn(module, project_dir) 返回同样形状。给「这一章
+    还要交一个文件」的检查用：那类检查既要读文件、又常常要调学生刚写的函数，
+    也必须和函数检查出现在同一份 JSON 里（执行器只认最后一行）。
+
+    `need_module=False` 给「这一章不写代码、只交文档」的章用——不然会在
+    第一条就报「没找到 main.py」，把真正的失败盖住。
     """
     items = []
-    try:
-        module, _path = load(project_dir, names)
-    except Missing as exc:
-        item(items, "找得到你的代码", False, str(exc))
-        finish(items)
-        return
-    except Exception:
-        # 语法错误、模块级异常：把最后一行贴出来，前面几十行堆栈对他没用
-        lines = traceback.format_exc().strip().splitlines()
-        item(items, "你的代码能被 import", False, " / ".join(lines[-3:]))
-        finish(items)
-        return
-
-    for name, fn in cases:
+    module = None
+    if need_module:
         try:
-            outcome = fn(module)
-            if isinstance(outcome, tuple):
-                ok, detail = outcome
-            else:
-                ok, detail = bool(outcome), ""
+            module, _path = load(project_dir, names)
         except Missing as exc:
-            ok, detail = False, str(exc)
+            item(items, "找得到你的代码", False, str(exc))
         except Exception:
-            ok, detail = False, "运行时出错：" + _last_line()
-        item(items, name, ok, detail)
+            # 语法错误、模块级异常：把最后一行贴出来，前面几十行堆栈对他没用
+            lines = traceback.format_exc().strip().splitlines()
+            item(items, "你的代码能被 import", False, " / ".join(lines[-3:]))
+
+    if module is not None:
+        for name, fn in cases:
+            _collect(items, name, lambda fn=fn, m=module: fn(m))
+    # 代码读不到时也跑文件检查：两样都缺，一次说清比修一样再跑一次省事
+    for name, fn in extra:
+        _collect(items, name, lambda fn=fn, m=module, p=project_dir: fn(m, p))
 
     finish(items)
