@@ -8,6 +8,10 @@ const state = {
   chapter: null,
   chatId: null,
   sending: false,
+  // 'chapter' | 'diagnostic'：诊断页没有章节，靠这个区分，别用 chapterId 空着来判断
+  view: 'chapter',
+  diagInfo: null,
+  diagResult: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -139,9 +143,16 @@ function fallbackMarkdown(src) {
 
 async function loadCourse() {
   state.course = await api('/course');
+  // 摸底卷的元信息（题数、上次成绩）用来画目录底部那张卡。
+  // 拿不到就不画——诊断卷坏了不该让整页打不开。
+  try {
+    state.diagInfo = await api('/diagnostic');
+  } catch (error) {
+    state.diagInfo = null;
+  }
   renderProgress();
   renderToc();
-  renderNextCard();
+  renderTocFoot();
 }
 
 function renderProgress() {
@@ -171,6 +182,7 @@ function renderToc() {
       return `<button class="${cls}" data-chapter="${c.id}">
         <span class="chap-no">${c.no}</span>
         <span class="chap-title">${escapeHtml(c.title)}</span>
+        ${quizLight(c.quiz)}
         <span class="dot ${c.status}"></span>
       </button>`;
     }).join('');
@@ -196,28 +208,52 @@ function renderToc() {
   });
 }
 
-function renderNextCard() {
+function diagnosticCardHtml() {
+  const info = state.diagInfo;
+  // 诊断卷读不到（文件坏了/后端旧版本）就不画这张卡，不显示一个点了会报错的按钮
+  if (!info) return '';
+  const last = info.last;
+  const sub = last
+    ? `摸底诊断 · 上次答对 ${last.correct}/${last.total}`
+    : `摸底诊断 · ${info.total} 题约 ${info.minutes} 分钟`;
+  const text = last
+    ? '知道该从哪开始了。换台设备或过一阵可以重测'
+    : '先测一下你已经会到哪，不然排进度只能靠猜';
+  return `<div class="diag-card">
+    <small>${escapeHtml(sub)}</small>
+    <b>${escapeHtml(text)}</b>
+    <button id="diagGo">${last ? '重新测一次' : '开始摸底'}</button>
+  </div>`;
+}
+
+function nextCardHtml() {
   const next = state.course.next;
-  const foot = el('tocFoot');
   if (!next) {
-    foot.innerHTML = `<div class="next-card all-done">
+    return `<div class="next-card all-done">
       <small>主干已学完</small>
       <b>可以去做项目了</b>
     </div>`;
-    return;
   }
-  foot.innerHTML = `<div class="next-card">
+  return `<div class="next-card">
     <small>按依赖顺序 · 下一步</small>
     <b>第 ${next.no} 章 ${escapeHtml(next.title)}</b>
     <button id="nextGo">去这一章</button>
   </div>`;
-  el('nextGo').addEventListener('click', () => openChapter(next.id));
+}
+
+function renderTocFoot() {
+  el('tocFoot').innerHTML = diagnosticCardHtml() + nextCardHtml();
+  const diagGo = el('diagGo');
+  if (diagGo) diagGo.addEventListener('click', openDiagnostic);
+  const nextGo = el('nextGo');
+  if (nextGo) nextGo.addEventListener('click', () => state.course.next && openChapter(state.course.next.id));
 }
 
 /* ---------------- 章节正文 ---------------- */
 
 async function openChapter(chapterId) {
   if (!chapterId) return;
+  state.view = 'chapter';
   state.chapterId = chapterId;
   location.hash = chapterId;
   closeDrawers();
@@ -255,6 +291,7 @@ function renderChapter(payload) {
     </div>
     ${gateHtml}
     <article class="prose">${renderMarkdown(payload.markdown)}</article>
+    ${renderQuiz(payload.quiz)}
     <div class="reader-actions">
       <button class="btn" id="prevBtn" ${payload.prev ? '' : 'disabled'}>← 上一章</button>
       <button class="btn primary ${done ? 'done' : ''}" id="doneBtn">
@@ -268,6 +305,7 @@ function renderChapter(payload) {
   el('prevBtn').addEventListener('click', () => payload.prev && openChapter(payload.prev));
   el('nextBtn').addEventListener('click', () => payload.next && openChapter(payload.next));
   el('doneBtn').addEventListener('click', () => toggleDone(c));
+  bindQuiz();
   el('reader').scrollTop = 0;
 }
 
@@ -298,7 +336,7 @@ async function toggleDone(chapter) {
     button.disabled = false;
     renderProgress();
     renderToc();
-    renderNextCard();
+    renderTocFoot();
     el('doneHint').textContent = target === 'done'
       ? `已记录（掌握度 ${result.progress.mastery}/3，做完自测题才够 2）`
       : '已撤销';
@@ -306,6 +344,364 @@ async function toggleDone(chapter) {
     button.disabled = false;
     el('doneHint').textContent = error.message;
   }
+}
+
+/* ---------------- 自测判分 ---------------- */
+
+// 目录里的小圆点：只看「有题库的章」。没题库不画点，画了等于告诉用户「这章没自测」，
+// 而 30 章暂时都没题库，画出来就是一片灰点噪音。
+function quizLight(quiz) {
+  if (!quiz || !quiz.total) return '';
+  const cls = quiz.passed >= quiz.total ? 'ok' : (quiz.answered ? 'half' : 'new');
+  const label = quiz.passed >= quiz.total
+    ? `自测 ${quiz.total} 题全过`
+    : (quiz.answered
+      ? `自测过了 ${quiz.passed}/${quiz.total} 题，还有没过的`
+      : `有 ${quiz.total} 道自测题，还没答`);
+  return `<span class="qlight ${cls}" title="${escapeHtml(label)}"></span>`;
+}
+
+function quizRows() {
+  const quiz = state.chapter && state.chapter.quiz;
+  return (quiz && quiz.state && quiz.state.items) || [];
+}
+
+function quizRowOf(itemId) {
+  return quizRows().find((row) => row.id === itemId) || null;
+}
+
+// 选项文字本来就长这样：「A. 城市」。取前面那个字母当提交值，
+// 不然提交整句会让判分器在句子里到处找字母（「B. 城市」里还有一个 B 之外的字母风险）。
+function optionLetter(option, index) {
+  const matched = String(option || '').match(/^\s*([A-Za-z])\s*[.、．)）:：]/);
+  return matched ? matched[1].toUpperCase() : String.fromCharCode(65 + index);
+}
+
+function quizItemHtml(item, index, options) {
+  const opts = options || {};
+  // 诊断页是盲测，不显示「上次几分」——那等于提示这题他做过、对过
+  const prev = opts.blind ? null : quizRowOf(item.id);
+  const badge = prev && prev.answered
+    ? `<span class="q-badge ${prev.passed ? 'ok' : 'bad'}">${prev.passed ? '已过' : '待重做'} ${prev.score} 分</span>`
+    : '';
+
+  let field = '';
+  if (item.kind === 'choice') {
+    const type = item.multi ? 'checkbox' : 'radio';
+    field = `<div class="q-options">${(item.options || []).map((option, i) => `
+      <label class="q-opt">
+        <input type="${type}" name="pick-${item.id}" value="${optionLetter(option, i)}">
+        <span>${escapeHtml(option)}</span>
+      </label>`).join('')}</div>`;
+  } else if (item.kind === 'blank') {
+    const count = Math.max(1, item.blank_count || 1);
+    field = `<div class="q-blanks">${Array.from({ length: count }, (_, i) =>
+      `<input class="q-blank" type="text" placeholder="第 ${i + 1} 空" autocomplete="off" spellcheck="false">`
+    ).join('')}</div>`;
+  } else {
+    field = `<textarea class="q-text" rows="3" placeholder="${opts.blind
+      ? '用自己的话写两三句，不用背原文'
+      : '用自己的话写两三句，说到要点就算过'}"></textarea>`;
+  }
+
+  const foot = opts.blind ? '' : `<div class="q-foot">
+      <button class="btn q-submit" type="button" data-submit="${item.id}">提交</button>
+      <span class="q-note" data-note="${item.id}"></span>
+    </div>
+    <div class="q-result" data-result="${item.id}" hidden></div>`;
+
+  return `<div class="q-item" data-item="${item.id}">
+    <div class="q-stem"><span class="q-no">${index + 1}</span><span class="q-stem-text">${escapeHtml(item.stem)}</span>${badge}</div>
+    ${field}
+    ${foot}
+  </div>`;
+}
+
+function renderQuiz(quiz) {
+  if (!quiz) return '';
+  if (quiz.error) {
+    // 题库写坏了要明说。静默当成「这章没题」，写题的人永远发现不了，
+    // 用户则会以为自己答了对的题却没被记录。
+    return `<section class="quiz quiz-error">
+      <div class="quiz-head"><b>自测</b><span>暂时用不了</span></div>
+      <p>这一章的题库有问题：${escapeHtml(quiz.error)}</p>
+    </section>`;
+  }
+  const items = quiz.items || [];
+  if (!items.length) return '';
+
+  return `<section class="quiz" id="quizCard">
+    <div class="quiz-head">
+      <b>自测 · ${items.length} 题</b>
+      <span id="quizSummary"></span>
+    </div>
+    <p class="quiz-tip">判分在本机算，同一份答案永远是同一个分数。写不出完整句子没关系，说到要点就算过。</p>
+    <div class="quiz-list">${items.map((item, i) => quizItemHtml(item, i)).join('')}</div>
+  </section>`;
+}
+
+function bindQuiz() {
+  const card = el('quizCard');
+  if (!card) return;
+  updateQuizSummary();
+  card.querySelectorAll('[data-submit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const root = button.closest('.q-item');
+      const item = (state.chapter.quiz.items || []).find((row) => row.id === button.dataset.submit);
+      if (item && root) submitQuizItem(item, root, button);
+    });
+  });
+}
+
+function updateQuizSummary() {
+  const node = el('quizSummary');
+  if (!node) return;
+  const quiz = state.chapter && state.chapter.quiz;
+  const quizState = (quiz && quiz.state) || null;
+  if (!quizState || !quizState.total) {
+    node.textContent = '';
+    return;
+  }
+  node.textContent = quizState.answered
+    ? `答过 ${quizState.answered}/${quizState.total} · 过了 ${quizState.passed} 题`
+    : '还没答过';
+}
+
+function collectAnswer(root, item) {
+  if (item.kind === 'choice') {
+    // 多选要排序：判分器按集合比，但排一下能让「提交了什么」在日志里可读
+    return [...root.querySelectorAll('input:checked')].map((node) => node.value).sort().join('');
+  }
+  if (item.kind === 'blank') {
+    // 多个空按行拼。判分器按行切，前端不要自己加序号或标点
+    return [...root.querySelectorAll('.q-blank')].map((node) => node.value.trim()).join('\n');
+  }
+  const area = root.querySelector('.q-text');
+  return area ? area.value.trim() : '';
+}
+
+function syncQuizToCourse(quizState, mastery) {
+  const chapter = (state.course.chapters || []).find((c) => c.id === state.chapterId);
+  if (chapter && quizState) {
+    chapter.quiz = {
+      total: quizState.total,
+      answered: quizState.answered,
+      passed: quizState.passed,
+    };
+  }
+  if (chapter && mastery) chapter.mastery = mastery.after;
+}
+
+async function submitQuizItem(item, root, button) {
+  const answer = collectAnswer(root, item);
+  const note = root.querySelector('[data-note]');
+  const resultBox = root.querySelector('[data-result]');
+  if (!answer) {
+    note.textContent = item.kind === 'choice' ? '先选一项再提交' : '还没写东西';
+    return;
+  }
+  button.disabled = true;
+  note.textContent = '判分中…';
+  try {
+    const result = await api(`/quiz/${encodeURIComponent(state.chapterId)}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ item_id: item.id, answer }),
+    });
+    // 整章状态用服务端回的覆盖，不在前端自己累加「过了几题」：
+    // 一旦两边口径不同（比如重做把原来的过改成没过），目录灯就会说谎。
+    state.chapter.quiz.state = result.quiz;
+    syncQuizToCourse(result.quiz, result.mastery);
+    renderToc();
+    updateQuizSummary();
+
+    note.textContent = '';
+    resultBox.hidden = false;
+    resultBox.className = `q-result ${result.passed ? 'ok' : 'bad'}`;
+    const masteryNote = result.mastery && result.mastery.changed
+      ? `<p class="q-mastery">掌握度 ${result.mastery.before} → ${result.mastery.after}：${escapeHtml(result.mastery.reason)}</p>`
+      : '';
+    resultBox.innerHTML = `
+      <div class="q-score">${result.score} 分 · ${result.passed ? '通过' : '没过'}${
+        result.grader === 'model' ? ' · 这题交给模型复核过' : ''}</div>
+      <p>${escapeHtml(result.detail || '')}</p>
+      ${result.explain ? `<p class="q-explain">${escapeHtml(result.explain)}</p>` : ''}
+      ${masteryNote}`;
+
+    const badgeHost = root.querySelector('.q-stem');
+    const old = badgeHost.querySelector('.q-badge');
+    if (old) old.remove();
+    if (result.quiz && result.quiz.items) {
+      const row = result.quiz.items.find((r) => r.id === item.id);
+      if (row && row.answered) {
+        const badge = document.createElement('span');
+        badge.className = `q-badge ${row.passed ? 'ok' : 'bad'}`;
+        badge.textContent = `${row.passed ? '已过' : '待重做'} ${row.score} 分`;
+        badgeHost.appendChild(badge);
+      }
+    }
+  } catch (error) {
+    note.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---------------- 摸底诊断 ---------------- */
+
+function stageNo(stageId) {
+  const matched = String(stageId || '').match(/(\d+)/);
+  return matched ? Number(matched[1]) : 99;
+}
+
+function stageTitle(stageId) {
+  const stage = (state.course.stages || []).find((s) => s.id === stageId);
+  return stage ? stage.title : stageId;
+}
+
+async function openDiagnostic() {
+  state.view = 'diagnostic';
+  state.chapterId = '';
+  state.diagResult = null;
+  location.hash = 'diagnostic';
+  closeDrawers();
+  el('tutorWhere').textContent = '正在做摸底诊断';
+  // 导师区不跟着换成诊断的说明，右上角写着「正在做诊断」、下面却还是第 1 章的
+  // 验收标准，会让人以为自己点错了。快捷问句也一并收起——诊断期间问章节问题没有落点。
+  el('tutorLog').innerHTML = `<div class="tutor-hint">
+    <p>诊断进行中。这里只测你已经会到哪，<b>不会的直接留空</b>，
+    答错不会扣掉任何进度——只是让起点算得更准一点。</p>
+  </div>`;
+  el('tutorQuick').innerHTML = '';
+  el('readerInner').innerHTML = '<div class="empty-state"><p>正在取卷子…</p></div>';
+  try {
+    const data = await api('/diagnostic');
+    state.diagInfo = data;
+    renderDiagnostic(data);
+  } catch (error) {
+    el('readerInner').innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function renderDiagnostic(data) {
+  const items = data.items || [];
+  el('readerInner').innerHTML = `
+    <div class="reader-top">
+      <span class="stage-tag">摸底诊断</span>
+      <span>${items.length} 题</span><span>·</span><span>约 ${data.minutes || 12} 分钟</span>
+    </div>
+    <h1 class="diag-title">${escapeHtml(data.title || '摸底诊断')}</h1>
+    <p class="diag-desc">${escapeHtml(data.description || '')}</p>
+    <div class="gate diag-gate">这次只为了知道你该从哪一章开始，不是考试。不会的直接留空，
+      一题别超过一分钟，也不要查资料——查了测出来的就不是你了。</div>
+    <div class="quiz-list diag-list">
+      ${items.map((item, i) => quizItemHtml(item, i, { blind: true })).join('')}
+    </div>
+    <div class="diag-actions">
+      <button class="btn primary" id="diagSubmit">交卷</button>
+      <span class="hint" id="diagHint"></span>
+    </div>`;
+  el('reader').scrollTop = 0;
+  el('diagSubmit').addEventListener('click', submitDiagnostic);
+}
+
+function collectDiagnosticAnswers() {
+  const data = state.diagInfo || {};
+  const answers = {};
+  (data.items || []).forEach((item) => {
+    const root = document.querySelector(`.q-item[data-item="${item.id}"]`);
+    if (!root) return;
+    // 诊断允许留空：跳过和不会在这里是同一个意思，不拦
+    answers[item.id] = collectAnswer(root, item);
+  });
+  return answers;
+}
+
+async function submitDiagnostic() {
+  const button = el('diagSubmit');
+  const hint = el('diagHint');
+  button.disabled = true;
+  hint.textContent = '正在判分…';
+  try {
+    const result = await api('/diagnostic/submit', {
+      method: 'POST',
+      body: JSON.stringify({ answers: collectDiagnosticAnswers() }),
+    });
+    state.diagResult = result;
+    // 卡片上的「上次答对 X/Y」跟着立刻更新，不用等刷新
+    state.diagInfo = { ...(state.diagInfo || {}), last: { correct: result.correct, total: result.total } };
+    renderTocFoot();
+    renderDiagnosticResult(result);
+  } catch (error) {
+    hint.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+// 正确答案可能是选项字母，也可能是「每空一组同义写法」的嵌套数组
+function answerText(answer) {
+  if (Array.isArray(answer)) {
+    return answer.map((group) => (Array.isArray(group) ? group.join(' / ') : String(group))).join('｜');
+  }
+  return String(answer === null || answer === undefined ? '' : answer);
+}
+
+function renderDiagnosticResult(result) {
+  const levels = result.levels || {};
+  const stages = Object.keys(levels).sort((a, b) => stageNo(a) - stageNo(b));
+  const levelRow = (stage) => {
+    const row = levels[stage];
+    const width = Math.round((row.level / Math.max(1, result.max_level || 2)) * 100);
+    // 0 级不写「未测」：这一阶段他答了但两道都错，说「未测」是假话
+    const label = row.level > 0 ? (row.label || '') : '还没到';
+    return `<div class="lv-row">
+      <span class="lv-name">${escapeHtml(stageTitle(stage))}</span>
+      <span class="lv-bar"><i style="width:${width}%"></i></span>
+      <span class="lv-val">${escapeHtml(label)} ${row.correct}/${row.total}</span>
+    </div>`;
+  };
+
+  const review = result.review || [];
+  const reviewHtml = review.map((row) => `
+    <div class="rv-item ${row.correct ? 'ok' : 'bad'}">
+      <div class="rv-stem"><span class="rv-mark">${row.correct ? '✓' : '✗'}</span>${escapeHtml(row.stem)}</div>
+      <div class="rv-line">你的作答：<b>${row.yours ? escapeHtml(answerText(row.yours)) : '（留空）'}</b></div>
+      ${row.correct ? '' : `<div class="rv-line">正确答案：<b>${escapeHtml(answerText(row.answer))}</b></div>`}
+      ${row.explain ? `<div class="rv-explain">${escapeHtml(row.explain)}</div>` : ''}
+    </div>`).join('');
+
+  const suggestions = stages.filter((stage) => (levels[stage].level || 0) < 2).slice(0, 3);
+
+  el('readerInner').innerHTML = `
+    <div class="reader-top">
+      <span class="stage-tag">摸底结果</span>
+      <span>答对 ${result.correct} / ${result.total}</span>
+    </div>
+    <h1 class="diag-title">你的起点</h1>
+    <p class="diag-desc">${suggestions.length
+      ? `这几段还没到位：${suggestions.map((s) => escapeHtml(stageTitle(s))).join('、')}。从最前面那段开始补，后面的会轻松很多。`
+      : '十个阶段都答对了。可以直接从第 1 章的练习开始快进，遇到卡的地方再回头。'}</p>
+
+    <div class="lv-list">${stages.map(levelRow).join('')}</div>
+    <p class="diag-note">等级：听过 → 能写 → 能讲。诊断只出选择题和填空题，
+      最高判到「能写」；「能讲」得靠章节里的开放题，那才真的要求把话说清楚。</p>
+
+    <div class="diag-actions">
+      <button class="btn primary" id="diagAgain">再测一次</button>
+      <button class="btn" id="diagBack">回到课程</button>
+    </div>
+
+    <h2 class="diag-h2">逐题回看</h2>
+    <div class="rv-list">${reviewHtml}</div>`;
+
+  el('reader').scrollTop = 0;
+  el('diagAgain').addEventListener('click', () => {
+    if (state.diagInfo) renderDiagnostic(state.diagInfo);
+  });
+  el('diagBack').addEventListener('click', () => {
+    const next = state.course.next;
+    if (next) openChapter(next.id);
+    else openChapter((state.course.chapters[0] || {}).id);
+  });
 }
 
 /* ---------------- 导师 ---------------- */
@@ -525,6 +921,10 @@ async function boot() {
   // 地址栏带着章节就打开它；否则从推荐的那一章开始，而不是第 1 章——
   // 用户学到一半回来，应该接着上次的位置
   const fromHash = (location.hash || '').replace('#', '');
+  if (fromHash === 'diagnostic') {
+    openDiagnostic();
+    return;
+  }
   const known = (state.course.chapters || []).some((c) => c.id === fromHash);
   const target = known ? fromHash : (state.course.next && state.course.next.id);
   if (target) openChapter(target);

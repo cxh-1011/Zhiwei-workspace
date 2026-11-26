@@ -129,8 +129,13 @@ def test_load_chapter():
     second = course.load_chapter("agent-dev", "s1c2")
     check("第 2 章上一章是 s1c1", second["prev"] == "s1c1")
 
-    # 自测答案依赖 details，正文必须保留这两个标签
-    check("正文保留 details 折叠块", "<details>" in payload["markdown"])
+    # 自测答案依赖 details，正文必须保留这两个标签。
+    # 用 s1c2 断言：s1c1 已经有判分题库，它的自测段会被切掉（见下一条）。
+    check("正文保留 details 折叠块", "<details>" in second["markdown"])
+
+    # 有题库的章不留 md 版自测：题目就是从那段改写的，留着等于先看答案再答题
+    check("有题库的章切掉 md 自测", "## 自测" not in payload["markdown"])
+    check("有题库的章仍保留其余正文", len(payload["markdown"]) > 500)
 
 
 def test_safety():

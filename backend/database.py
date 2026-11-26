@@ -932,6 +932,33 @@ def list_quiz_attempts(course_id, chapter_id=None, item_id=None, limit=50):
     ]
 
 
+def quiz_pass_summary(course_id):
+    """{chapter_id: {"answered": 答过几题, "passed": 过了几题}}，一次查全。
+
+    给目录红绿灯用。判定口径必须和 quiz.chapter_state 完全一致——
+    「每道题取最近一次」，所以这里先用 MAX(id) 按 (章, 题) 分组，
+    再统计。两边口径一旦分叉，就会出现「目录是绿的、点进去发现有题没过」。
+
+    不在这里算「一共几题」：那是题库文件的事实，不是数据库的事实，
+    由 quiz.quiz_totals() 去读文件，两边在 course.decorate 里合并。
+    """
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT chapter_id, item_id, passed FROM quiz_attempts "
+        "WHERE course_id=? AND id IN "
+        "(SELECT MAX(id) FROM quiz_attempts WHERE course_id=? GROUP BY chapter_id, item_id)",
+        (course_id, course_id),
+    ).fetchall()
+    conn.close()
+    summary = {}
+    for chapter_id, _item_id, passed in rows:
+        row = summary.setdefault(chapter_id, {"answered": 0, "passed": 0})
+        row["answered"] += 1
+        if passed:
+            row["passed"] += 1
+    return summary
+
+
 def latest_quiz_scores(course_id):
     """{chapter_id: {"score": 最近一次的分数, "at": 时间}}。
 

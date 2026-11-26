@@ -34,6 +34,7 @@ from agent import run_agent, run_agent_stream, request_cancel, resolve_approval
 from llm import ModelConfigError, chat_completion, test_connection
 import course as course_lib
 import quiz as quiz_lib
+import profile as profile_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -1233,6 +1234,59 @@ def submit_quiz_answer(
         "explain": item.get("explain") or "",
         "quiz": state,
         "mastery": state.get("mastery"),
+    }
+
+
+# ---------- 摸底诊断 ----------
+# 路径刻意不放在 /quiz/ 下面：/quiz/diagnostic/submit 和 /quiz/{chapter_id}/submit
+# 段数完全一样，谁先注册谁赢。写成 /diagnostic 就没有这个歧义——
+# 靠注册顺序躲冲突，下次有人挪一行代码就会静默走错分支。
+
+
+@app.get("/diagnostic")
+def get_diagnostic(course_id: str = course_lib.DEFAULT_COURSE):
+    """摸底卷。题目盲测：不带 stage，id 也换成 d1/d2…，否则一看就知道考哪段。"""
+    try:
+        diagnostic = quiz_lib.load_diagnostic(course_id)
+    except quiz_lib.QuizError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "title": diagnostic.get("title") or "摸底诊断",
+        "description": diagnostic.get("description") or "",
+        "minutes": int(diagnostic.get("minutes") or 0),
+        "total": len(diagnostic.get("items") or []),
+        "items": quiz_lib.public_diagnostic(diagnostic),
+        **profile_lib.summary(course_id),
+    }
+
+
+class DiagnosticSubmitRequest(BaseModel):
+    # 键是 d1/d2…，值是作答。整体一次交，不逐题提交——
+    # 诊断要的是「这一刻的水平」，边答边看结果会影响后面的题。
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+@app.post("/diagnostic/submit")
+def submit_diagnostic(
+    data: DiagnosticSubmitRequest, course_id: str = course_lib.DEFAULT_COURSE
+):
+    """交卷：算分 → 存诊断 → 覆盖画像 → 回结果与逐题解析。
+
+    刻意不写 course_progress：诊断判 level 2 是「这段可以跳过」，
+    写成「这些章学完了」会让进度条瞬间跳到 60%，而正文一章没读。
+    """
+    try:
+        diagnostic = quiz_lib.load_diagnostic(course_id)
+    except quiz_lib.QuizError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # 前端只认识 dN，这里映射回真 id（按题目顺序，确定映射，不需要会话）
+    mapped = quiz_lib.diagnostic_answers(diagnostic, data.answers)
+    scored = quiz_lib.score_diagnostic(diagnostic, mapped)
+    result = profile_lib.apply(diagnostic, scored, mapped, course_id)
+    return {
+        **result,
+        "review": quiz_lib.diagnostic_review(diagnostic, mapped),
     }
 
 

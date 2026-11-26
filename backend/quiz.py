@@ -465,6 +465,51 @@ def public_items(quiz):
 
 # ---------- 与作答记录合并 ----------
 
+_TOTALS_CACHE = {}
+
+
+def quiz_totals(course_id=DEFAULT_COURSE):
+    """{chapter_id: 这一章有几道题}。只数题目个数，不做完整校验。
+
+    给目录红绿灯用：要知道「3 题过了 2 题」必须两个数都拿到，
+    而「一共几题」只在题库文件里。逐章 load_quiz 会对 33 个文件各跑一遍
+    validate_quiz，目录每刷一次都付这个代价；这里只 json.loads 数 items。
+
+    校验仍然只在真正打开章节、真正判分时做——那种时候错了必须报出来。
+    这里读坏了就当「这章没题」，目录少一个小圆点，不会挡住任何操作。
+    """
+    root = CURRICULUM_ROOT / course_id / "quiz"
+    if not root.is_dir():
+        return {}
+    try:
+        files = sorted(p for p in root.glob("*.json") if not p.name.startswith("_"))
+    except OSError:
+        return {}
+    if not files:
+        return {}
+    # 目录里的文件会边写边变，所以缓存键用「最晚的修改时间」，
+    # 而不是目录本身的 mtime——加文件才会改目录 mtime，改文件不会。
+    try:
+        stamp = max(p.stat().st_mtime_ns for p in files)
+    except OSError:
+        stamp = 0
+    key = (str(root), stamp, len(files))
+    if key in _TOTALS_CACHE:
+        return _TOTALS_CACHE[key]
+
+    totals = {}
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items = data.get("items") if isinstance(data, dict) else None
+        if isinstance(items, list) and items:
+            totals[path.stem] = len(items)
+    _TOTALS_CACHE[key] = totals
+    return totals
+
+
 def chapter_state(chapter_id, course_id=DEFAULT_COURSE, quiz=None):
     """这一章的判分状态：每题最近一次过没过，以及整章过了几题。
 
@@ -731,6 +776,75 @@ def score_diagnostic(diagnostic, answers):
         "correct": sum(row["correct"] for row in stages.values()),
         "max_level": max_level,
     }
+
+
+# ---------- 诊断卷：给前端的视图 ----------
+
+DIAG_PUBLIC_PREFIX = "d"
+
+
+def public_diagnostic(diagnostic):
+    """诊断卷给前端的形态：盲测，连 id 都不能带阶段。
+
+    题目的 id 原本是 diag-s1-q1，前缀直接写着阶段——发出去就等于告诉答题人
+    「这题属于地基」，他会照着阶段去猜难度，测出来的水平就不作数了。
+    所以对外一律换成 d1 / d2…，提交时按**顺序**映射回真 id：
+    同一份文件同一个顺序，映射是确定的，不需要在服务端存会话。
+    """
+    items = []
+    for index, item in enumerate((diagnostic or {}).get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        public = {"id": "%s%d" % (DIAG_PUBLIC_PREFIX, index + 1),
+                  "kind": item.get("kind"), "stem": item.get("stem")}
+        if item.get("options"):
+            public["options"] = list(item["options"])
+        if item.get("multi"):
+            public["multi"] = True
+        if item.get("kind") == "blank":
+            public["blank_count"] = len(item.get("blanks") or [])
+        items.append(public)
+    return items
+
+
+def diagnostic_answers(diagnostic, public_answers):
+    """把 {d3: "B"} 映射回 {diag-s3-q1: "B"}，认不出的键直接丢掉。"""
+    order = [item for item in (diagnostic or {}).get("items") or [] if isinstance(item, dict)]
+    mapped = {}
+    for key, value in (public_answers or {}).items():
+        text = str(key or "")
+        if not text.startswith(DIAG_PUBLIC_PREFIX):
+            continue
+        try:
+            index = int(text[len(DIAG_PUBLIC_PREFIX):]) - 1
+        except ValueError:
+            continue
+        if 0 <= index < len(order):
+            mapped[str(order[index].get("id"))] = value
+    return mapped
+
+
+def diagnostic_review(diagnostic, answers):
+    """交卷后回看：每题对不对、正确答案、解析。
+
+    只在交卷后调用一次——同一份数据在答题前下发就等于把答案送出去。
+    """
+    rows = []
+    for index, item in enumerate((diagnostic or {}).get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        answer = (answers or {}).get(item.get("id"))
+        result = grade(item, answer) if str(answer or "").strip() else {"score": 0, "passed": False}
+        rows.append({
+            "id": "%s%d" % (DIAG_PUBLIC_PREFIX, index + 1),
+            "stage": item.get("stage"),
+            "stem": item.get("stem"),
+            "answer": item.get("answer") or item.get("blanks"),
+            "yours": answer,
+            "correct": bool(result["passed"]),
+            "explain": item.get("explain") or "",
+        })
+    return rows
 
 
 # ---------- 模型兜底 ----------

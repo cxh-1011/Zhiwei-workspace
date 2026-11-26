@@ -561,3 +561,175 @@ button { cursor: pointer; }
 }
 .tutor-hint .hint-goals li { margin: 3px 0; }
 .tutor-hint .hint-goals li::marker { color: #b3b9d6; }
+
+/* ---------- 目录里的小圆点：这一章的自测过了几题 ---------- */
+
+/* 和右边的 status.dot 并排，但含义不同：
+   右边那个是「学没学过」，这个是「考过没有」。两个都留，是因为它们真会不一致
+   ——手点学完、题一道没答，就是左边空环 + 右边绿点。 */
+.qlight {
+  flex: 0 0 5px;
+  width: 5px;
+  height: 5px;
+  margin-top: 7px;
+  border: 1px solid #cdd1da;
+  border-radius: 50%;
+  background: transparent;
+}
+.qlight.half { border-color: #dcb25c; background: #f0c368; }
+.qlight.ok { border-color: var(--ok); background: var(--ok); }
+
+/* ---------- 章末自测 ---------- */
+
+.quiz {
+  margin-top: 34px;
+  padding: 18px 20px 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fcfcfe;
+}
+
+.quiz-head { display: flex; align-items: baseline; gap: 10px; }
+.quiz-head b { color: #2d3340; font-size: 12.5px; font-weight: 600; }
+.quiz-head span { margin-left: auto; color: var(--muted); font-size: 10.5px; }
+.quiz-tip { margin: 6px 0 4px; color: var(--muted); font-size: 11px; line-height: 1.8; }
+
+.quiz-error { border-color: #f0d9d9; background: #fdf8f8; }
+.quiz-error p { margin: 8px 0 12px; color: #a35a5a; font-size: 11.5px; line-height: 1.7; }
+
+.q-item { padding: 15px 0 4px; border-top: 1px solid var(--line-2); }
+.q-item:first-child { border-top: 0; }
+.q-item + .q-item { margin-top: 4px; }
+
+.q-stem {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: #2b313d;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+.q-stem-text { flex: 1; min-width: 0; }
+.q-no {
+  flex: 0 0 auto;
+  min-width: 14px;
+  color: var(--muted-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.q-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 20px;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.q-badge.ok { background: var(--ok-soft); color: #3f8f61; }
+.q-badge.bad { background: var(--warn-soft); color: #a8791a; }
+
+.q-options { display: grid; gap: 6px; margin: 10px 0 0 22px; }
+.q-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  color: #4a505c;
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: pointer;
+}
+.q-opt:hover { border-color: #d7daf0; background: #fafaff; }
+.q-opt input { margin: 4px 0 0; accent-color: var(--accent); }
+
+.q-blanks { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0 22px; }
+.q-blank, .q-text {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.q-blank { flex: 0 1 180px; }
+.q-text { width: calc(100% - 22px); margin: 10px 0 0 22px; resize: vertical; }
+.q-blank:focus, .q-text:focus { border-color: #c3c9ef; outline: 0; box-shadow: 0 0 0 3px #5868df14; }
+
+.q-foot { display: flex; align-items: center; gap: 10px; margin: 10px 0 12px 22px; }
+.q-submit { height: 30px; padding: 0 12px; font-size: 11px; }
+.q-note { color: var(--muted-2); font-size: 10.5px; }
+
+.q-result { margin: 0 0 14px 22px; padding: 11px 13px; border-radius: 10px; font-size: 11.5px; line-height: 1.8; }
+.q-result.ok { border: 1px solid #d9ecdf; background: var(--ok-soft); color: #35694a; }
+.q-result.bad { border: 1px solid #f0e2cd; background: var(--warn-soft); color: #8a6524; }
+.q-result p { margin: 5px 0 0; }
+.q-result .q-score { font-weight: 600; }
+.q-result .q-explain { color: #6a7180; }
+.q-result .q-mastery { color: #5868df; }
+
+/* ---------- 目录底部的摸底入口 ---------- */
+
+.diag-card {
+  margin-bottom: 9px;
+  padding: 9px 10px;
+  border: 1px dashed #d9dcee;
+  border-radius: 9px;
+  background: #fff;
+}
+.diag-card small { display: block; color: var(--muted); font-size: 9px; letter-spacing: .06em; }
+.diag-card b { display: block; margin-top: 3px; color: #4a5170; font-size: 10.5px; font-weight: 500; line-height: 1.55; }
+.diag-card button {
+  margin-top: 7px;
+  padding: 5px 9px;
+  border: 1px solid #dcdfef;
+  border-radius: 6px;
+  background: #fff;
+  color: #5868df;
+  font-size: 10px;
+}
+.diag-card button:hover { background: #f7f8ff; border-color: #c8cdf0; }
+
+/* ---------- 摸底诊断页 ---------- */
+
+.diag-title { margin: 4px 0 10px; color: #1e232c; font-size: 24px; line-height: 1.35; letter-spacing: -.02em; }
+.diag-desc { margin: 0 0 16px; color: #5d6472; font-size: 12.5px; line-height: 1.9; }
+.diag-gate { margin: 0 0 22px; }
+.diag-list .q-item:first-child { border-top: 0; }
+.diag-list .q-item { padding: 16px 0 12px; }
+
+.diag-actions { display: flex; align-items: center; gap: 10px; margin: 22px 0 8px; }
+.diag-actions .hint { color: var(--muted-2); font-size: 10.5px; }
+.diag-note { margin: 12px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.8; }
+.diag-h2 { margin: 34px 0 10px; padding-top: 16px; border-top: 1px solid var(--line-2); color: #232936; font-size: 15px; }
+
+/* 阶段等级条 */
+.lv-list { display: grid; gap: 7px; margin: 18px 0 0; }
+.lv-row { display: flex; align-items: center; gap: 10px; font-size: 11.5px; }
+.lv-name { flex: 0 0 76px; color: #4a505c; }
+.lv-bar { flex: 1; height: 5px; overflow: hidden; border-radius: 99px; background: var(--line-2); }
+.lv-bar i { display: block; height: 100%; border-radius: inherit; background: #7f8ce6; }
+.lv-val { flex: 0 0 74px; color: var(--muted); font-size: 10.5px; text-align: right; }
+
+/* 逐题回看 */
+.rv-list { display: grid; gap: 10px; }
+.rv-item { padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: #fcfcfd; font-size: 11.5px; line-height: 1.8; }
+.rv-item.bad { border-color: #f0e2cd; background: #fffdf8; }
+.rv-stem { display: flex; gap: 7px; color: #2b313d; font-weight: 500; }
+.rv-mark { flex: 0 0 auto; color: var(--ok); }
+.rv-item.bad .rv-mark { color: #c08a2a; }
+.rv-line { margin-top: 5px; color: var(--muted); }
+.rv-line b { color: #3e444f; font-weight: 600; }
+.rv-explain { margin-top: 6px; color: #6a7180; }
+
+@media (max-width: 560px) {
+  .quiz, .diag-card { border-radius: 12px; }
+  .quiz { padding: 15px 14px 6px; }
+  .q-options, .q-blanks, .q-text, .q-foot, .q-result { margin-left: 0; }
+  .q-text { width: 100%; }
+  .lv-name { flex-basis: 58px; }
+  .lv-val { flex-basis: 62px; }
+}

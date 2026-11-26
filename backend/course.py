@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from database import list_course_progress
+from database import list_course_progress, quiz_pass_summary
 
 CURRICULUM_ROOT = Path(__file__).resolve().parent.parent / "curriculum"
 DEFAULT_COURSE = "agent-dev"
@@ -46,6 +46,18 @@ def load_course(course_id: str = DEFAULT_COURSE) -> dict:
     return data
 
 
+# 章节里的自测段。只有「这一章已经有判分题库」时才切掉它：
+# 题库的题就是从这段改写的，留着等于把答案摊在页面上，用户先看见答案再答题，
+# 判分就白做了。没出题库的章照旧显示——那是他唯一的自测。
+_SELFTEST_RE = re.compile(r"(?ms)^##(?!#)[^\n]*自测[^\n]*\n.*?(?=^##(?!#)\s|\Z)")
+
+
+def strip_self_test(markdown: str) -> str:
+    """去掉「## 自测」这一整段。切在服务端做，不让前端拿正则切 md——
+    前端切坏了会连后面的小节一起吞掉，而且没人看得见。"""
+    return _SELFTEST_RE.sub("", markdown or "").rstrip() + "\n"
+
+
 def load_chapter(course_id: str, chapter_id: str) -> dict:
     if not _ID_RE.match(chapter_id or ""):
         raise CourseError("章节 id 不合法：%s" % chapter_id)
@@ -63,6 +75,9 @@ def load_chapter(course_id: str, chapter_id: str) -> dict:
 
     order = [c["id"] for c in course["chapters"]]
     index = order.index(chapter_id)
+    quiz = chapter_quiz(course_id, chapter_id)
+    if quiz.get("items"):
+        body = strip_self_test(body)
     return {
         "chapter": chapter,
         "markdown": body.strip(),
@@ -70,7 +85,7 @@ def load_chapter(course_id: str, chapter_id: str) -> dict:
         "next": order[index + 1] if index + 1 < len(order) else None,
         "total": len(order),
         "index": index + 1,
-        "quiz": chapter_quiz(course_id, chapter_id),
+        "quiz": quiz,
     }
 
 
@@ -109,13 +124,31 @@ def _is_passed(entry: dict) -> bool:
 
 def decorate(course: dict, course_id: str = DEFAULT_COURSE) -> dict:
     """把数据库里的进度贴到课程树上，并算出统计。"""
+    import quiz as quiz_lib  # 局部导入：quiz 顶部 import 了本模块
+
     progress = list_course_progress(course_id)
+    # 自测灯要两个数据源：一共几题（题库文件）、过了几题（作答记录）。
+    # 两个都一次查全，不在循环里查——目录每刷一次都会走这条路径。
+    totals = quiz_lib.quiz_totals(course_id)
+    passed_map = quiz_pass_summary(course_id)
     chapters = course["chapters"]
     for chapter in chapters:
         entry = progress.get(chapter["id"]) or {}
         chapter["status"] = entry.get("status") or "todo"
         chapter["mastery"] = int(entry.get("mastery") or 0)
         chapter["notes"] = entry.get("notes") or ""
+        # 没有题库的章给 None，不是给 {total: 0}：前端要能区分
+        # 「这章还没出题」和「有题但一题没答」，两者的圆点长得不一样。
+        total = int(totals.get(chapter["id"]) or 0)
+        if total:
+            counts = passed_map.get(chapter["id"]) or {}
+            chapter["quiz"] = {
+                "total": total,
+                "answered": min(int(counts.get("answered") or 0), total),
+                "passed": min(int(counts.get("passed") or 0), total),
+            }
+        else:
+            chapter["quiz"] = None
 
     done = sum(1 for c in chapters if c["status"] == "done")
     passed = sum(1 for c in chapters if _is_passed(c))

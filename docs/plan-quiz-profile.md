@@ -24,7 +24,14 @@
 > `test_quiz_mastery.py` 36 项 + `test_quiz_api.py` 31 项。
 > **真实库里 course_progress / quiz_attempts 都是 0 行**，所以没有历史数据要迁移，
 > 第一次真实写入会在用户下次点「学完」或答题时发生。
-> 下一步是 ⑤ 前端答题界面。
+>
+> **第 ⑤ 步（前端答题界面 + 目录灯 + 摸底入口）已落地**（tag `v0.21.0-quiz-ui`）：
+> `learn.js` 的 `renderQuiz` / `quizLight` / `openDiagnostic`；新增 `backend/profile.py`
+> （诊断落库 + 按阶段覆盖画像）、`GET /diagnostic`、`POST /diagnostic/submit`、
+> `database.quiz_pass_summary`、`quiz.quiz_totals` / `public_diagnostic` /
+> `diagnostic_answers` / `diagnostic_review`、`course.strip_self_test`。
+> `test_quiz_page.py` 32 项 + 无头浏览器端到端 19 项（截图在 `backups/ui_smoke/`）。
+> 下一步是 ⑥ 改 `recommend_next` 的跳章语义（见 8.2 节）。
 
 ## 0. 动手前必须先认的三件事
 
@@ -476,3 +483,32 @@ _ensure_column(cursor, "course_progress", "quiz_at", "TEXT")
 留一个待定的问题：三题全过但没点「学完」时，`status` 仍是 `todo`，
 于是推荐还是会推这一章。要不要在首次答题时把 status 置成 `learning`（推荐规则 1
 会优先收尾这一章），等前端做完再定——那是个会改变推荐行为的决定，不适合顺手改。
+
+### 8.5 第 ⑤ 步（前端）实际落地时的四个决定
+
+**一、路由不能叫 `/quiz/diagnostic`。** 最初按 `/quiz/diagnostic/submit` 写，
+结果和 `/quiz/{chapter_id}/submit` 段数一样、被先注册的动态路由吃掉：
+chapter_id="diagnostic"，然后 pydantic 报「缺 item_id」。测试里看到的是 422，
+在浏览器里会表现成「交卷按钮点了没反应」。改成 `/diagnostic` 与
+`/diagnostic/submit`，让冲突不存在，而不是靠注册顺序躲开——躲开的写法，
+下次有人挪一行代码就会静默走错分支。
+
+**二、盲测连 id 都要换。** 题目原 id 是 `diag-s1-q1`，前缀直接写着阶段，
+发出去等于告诉答题人「这题属于地基」。所以对外一律 `d1…d20`，
+提交时按**题目顺序**映射回真 id：同一份文件同一个顺序，映射确定，服务端不用存会话。
+
+**三、目录灯和 status 点是两个东西，必须分开画。** 右点是「学没学过」，
+左环是「考过没有」。它们真会不一致——手点学完、题一道没答，就是空环 + 绿点。
+合成一个点的话，「学了但没考」和「考了但没过」会看起来一样。
+数据也分开取：`quiz_totals()` 数题库文件（判定「一共几题」），
+`quiz_pass_summary()` 一次查出并统计（判定「过了几题」），
+两者在 `decorate` 里合并，**都不在循环里查库**。
+
+**四、只有出了题库的章才切 md 自测段。** 题库的题就是从 `## 自测` 改写的，
+留着等于先看答案再答题；但另外 30 章没有题库，那段是他们唯一的自测，切了就是删内容。
+所以 `strip_self_test()` 只在 `chapter_quiz()` 返回非空时调用。
+切在服务端做，不让前端拿正则切 md——前端切坏了会连后面的小节一起吞掉，而且没人看得见。
+
+配套一条：诊断**不写 course_progress**。判 level 2 的意思是「这段可以跳过」，
+写成「这些章学完了」会让进度条瞬间跳到 60%，而正文一章没读。
+`test_quiz_page.py` 里专门有一条 `诊断不写 course_progress` 盯着这件事。
