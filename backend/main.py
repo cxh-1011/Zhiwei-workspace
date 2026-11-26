@@ -40,6 +40,7 @@ import profile as profile_lib
 import schedule as schedule_lib
 import projects as projects_lib
 import checks as checks_lib
+import envs as envs_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -1623,6 +1624,56 @@ def run_project_check(project_id: int):
     )
     result["project"] = projects_lib.decorate(get_project_row(project_id))
     return result
+
+
+@app.post("/projects/{project_id}/env")
+def prepare_project_env(project_id: int):
+    """给项目建一个独立的 Python 环境（venv）。
+
+    为什么是用户点一下才建：`python -m venv` 在本机要十几秒。放在「新建项目」
+    里会让新建按钮卡住，放在「跑验收」里会让每次验收都重付这个代价。
+    建好之后一直用：验收脚本、`run_command` 的 python/pip/pytest 全用它。
+    """
+    try:
+        row = projects_lib.validate(project_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        result = envs_lib.ensure(row["path"])
+    except envs_lib.EnvError as exc:
+        # 磁盘满、杀毒软件锁目录：原因原样给用户，不要包成 500
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "created": result["created"],
+        "python_source": "venv",
+        "version": envs_lib.version(result["python"]),
+        "env": envs_lib.info(row["path"]),
+        "project": projects_lib.decorate(get_project_row(project_id)),
+    }
+
+
+@app.post("/projects/{project_id}/deps")
+def install_project_deps(project_id: int):
+    """按 requirements.txt 往项目环境里装依赖。
+
+    联网动作，只从用户点击进来：agent 能写 requirements.txt，装不装、什么时候
+    装由用户决定。模型没有「自己 pip install」的工具，这一条是刻意的。
+    """
+    try:
+        row = projects_lib.validate(project_id)
+    except projects_lib.ProjectError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        result = envs_lib.install(row["path"])
+    except envs_lib.EnvError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "packages": result["packages"],
+        "created": result["created"],
+        "output": result["output"],
+        "env": envs_lib.info(row["path"]),
+        "project": projects_lib.decorate(get_project_row(project_id)),
+    }
 
 
 @app.delete("/projects/{project_id}")

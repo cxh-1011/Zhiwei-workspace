@@ -1247,6 +1247,7 @@ function projectCardHtml() {
           <code>${escapeHtml(item.shown_path)}</code>
           ${on ? '<span class="proj-on">导师已切到这个项目</span>' : ''}
           ${item.exists ? '' : '<span class="proj-gone">目录不在了</span>'}
+          ${envHtml(item)}
         </div>
         ${detail}
       </div>`;
@@ -1271,9 +1272,43 @@ function projectCardHtml() {
   </section>`;
 }
 
+/* 环境状态放在路径旁边，因为它解释的是「这条路径里发生的事跑在哪个 Python 上」。
+
+   不做的两件事：不自动建（十几秒，且 33 章验收只用标准库，多数项目不需要），
+   不隐藏按钮（需要的时候找得到，不需要的时候也看得见它是可选的）。 */
+function envHtml(item) {
+  if (!item || !item.exists) return '';
+  const env = item.env || {};
+  const req = env.requirements || {};
+  const parts = [];
+  if (env.present) {
+    parts.push(`<span class="proj-env on" title="验收和 python 命令都跑在这个环境里">项目环境${env.version ? ' ' + escapeHtml(env.version) : ''}</span>`);
+  } else {
+    parts.push(`<button class="proj-env" data-env="${item.id}"
+      title="给这个目录建独立的 .venv，首次约 10–20 秒。只用标准库的章节不需要">准备环境</button>`);
+  }
+  // 清单有问题时环境状态照常显示：两件事互不替代，藏掉任何一件都会让人
+  // 以为「环境没了」或「清单没事」。
+  if (req.error) {
+    parts.push(`<span class="proj-env bad" title="${escapeHtml(req.error)}">requirements.txt 有问题</span>`);
+  } else if (env.present && req.present) {
+    parts.push(`<button class="proj-env" data-deps="${item.id}"
+      title="按 requirements.txt 装进项目环境（会联网）">装依赖${req.count ? ' ' + req.count : ''}</button>`);
+  }
+  return parts.join('');
+}
+
 /* 验收结果：过了就一行绿的，没过逐条列出。
    失败项的 detail 是验收脚本写的「应该是什么、你写成了什么」，
    直接原样显示——改写它只会丢掉最有用的一半信息。 */
+/* 验收跑在哪个解释器上。「明明装了包却说没装」时这是第一个要看的东西，
+   所以放在结果标题里，不用再展开一层。 */
+function whereText(result) {
+  if (result.python_source === 'venv') return ' · 项目环境';
+  if (result.python_source === 'system') return ' · 默认环境';
+  return '';
+}
+
 function checkDetailHtml(result) {
   if (!result) return '';
   if (result.error) {
@@ -1292,8 +1327,8 @@ function checkDetailHtml(result) {
     </li>`;
   }).join('');
   const head = result.ok
-    ? `验收通过 ${result.passed}/${result.total}（${Math.round((result.elapsed_ms || 0) / 100) / 10}s）`
-    : `验收没过 ${result.passed}/${result.total}`;
+    ? `验收通过 ${result.passed}/${result.total}（${Math.round((result.elapsed_ms || 0) / 100) / 10}s）${whereText(result)}`
+    : `验收没过 ${result.passed}/${result.total}${whereText(result)}`;
   return `<div class="proj-check ${result.ok ? 'ok' : 'bad'}">
     <b>${escapeHtml(head)}</b><ul>${rows}</ul>
     ${result.stdout && !result.ok ? `<details><summary>你的程序输出</summary><pre>${escapeHtml(result.stdout)}</pre></details>` : ''}
@@ -1362,6 +1397,12 @@ function bindProjectCard() {
   });
   card.querySelectorAll('[data-remove]').forEach((btn) => {
     btn.addEventListener('click', () => removeProject(Number(btn.dataset.remove)));
+  });
+  card.querySelectorAll('[data-env]').forEach((btn) => {
+    btn.addEventListener('click', () => prepareProjectEnv(Number(btn.dataset.env)));
+  });
+  card.querySelectorAll('[data-deps]').forEach((btn) => {
+    btn.addEventListener('click', () => installProjectDeps(Number(btn.dataset.deps)));
   });
   // 重画列表时按钮节点还在，直接再 bind 会叠加监听器：点一次建出两个项目。
   // 用 cloneNode 换一个干净节点，比记「绑过没有」可靠。
@@ -1462,6 +1503,50 @@ async function runProjectCheck(id) {
     renderProjectList();
     hint.textContent = '';
   }
+}
+
+/* 准备环境与装依赖都要等十几秒到一两分钟，所以在卡片底部那行就地反馈：
+   学生会一直盯着这一行，弹窗反而多一步关闭。 */
+async function prepareProjectEnv(id) {
+  const hint = el('projHint');
+  const row = (state.projects || []).find((item) => item.id === id);
+  if (!row || !row.exists) {
+    hint.textContent = '这个目录不在了，先新建一个项目。';
+    return;
+  }
+  hint.textContent = `正在给「${row.name}」建独立环境（首次约 10–20 秒，别关页面）…`;
+  try {
+    const payload = await api(`/projects/${id}/env`, { method: 'POST' });
+    replaceProject(payload.project);
+    hint.textContent = payload.created
+      ? `环境好了${payload.version ? '：Python ' + payload.version : ''}，之后验收和 python 命令都跑在它里面。`
+      : '这个项目已经有环境了。';
+  } catch (error) {
+    hint.textContent = error.message;
+  }
+}
+
+async function installProjectDeps(id) {
+  const hint = el('projHint');
+  const row = (state.projects || []).find((item) => item.id === id);
+  hint.textContent = '正在装依赖（要联网，可能一两分钟）…';
+  try {
+    const payload = await api(`/projects/${id}/deps`, { method: 'POST' });
+    replaceProject(payload.project);
+    const names = (payload.packages || []).join('、');
+    hint.textContent = names ? `装好了：${names}` : '装好了。';
+  } catch (error) {
+    hint.textContent = error.message;
+  }
+}
+
+/* 服务端返回的项目行是唯一事实来源（含 env 与 check 状态），别在本地拼。 */
+function replaceProject(project) {
+  if (!project) return;
+  state.projects = (state.projects || []).map((item) => (item.id === project.id ? project : item));
+  if (state.activeProject && state.activeProject.id === project.id) state.activeProject = project;
+  renderProjectList();
+  renderTutorHead();
 }
 
 async function removeProject(id) {

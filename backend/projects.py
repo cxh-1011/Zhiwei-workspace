@@ -24,6 +24,7 @@ import re
 import shutil
 
 import database
+import envs
 from course import CURRICULUM_ROOT, DEFAULT_COURSE
 from tools import _guard
 
@@ -120,6 +121,12 @@ def _starter_readme(name, course_id, chapter_id):
     lines.append("")
     lines.append("在这个目录里直接跑 `python -m pytest .`，或者在页面上点「跑验收」。")
     lines.append("验收脚本只读你的代码、不修改它；没过时会指出哪一条没满足。")
+    lines.append("")
+    lines.append("## 需要额外依赖时")
+    lines.append("")
+    lines.append("点页面上的「准备环境」，这个目录会有自己的 `.venv`；之后验收和 `python`")
+    lines.append("都跑在它里面。要装包就写 `requirements.txt`（一行一个包名），再点「装依赖」。")
+    lines.append("只用标准库的章节不需要这一步。")
     lines.append("")
     return "\n".join(lines)
 
@@ -291,11 +298,17 @@ def tree(project_id, max_entries=200):
 
 
 def decorate(row):
-    """给接口用的项目行：数据库字段 + 磁盘现状 + 章节标题。"""
+    """给接口用的项目行：数据库字段 + 磁盘现状 + 章节标题 + 环境状态。"""
     if not row:
         return None
     item = dict(row)
     item["exists"] = os.path.isdir(row["path"])
+    # 环境状态直接看磁盘，不存库：.venv 被手动删掉之后，库里那条记录就成了谎话。
+    # 代价是每次列项目都读一遍 requirements.txt——学习项目的文件只有几个，无所谓。
+    item["env"] = envs.info(row["path"]) if item["exists"] else {
+        "present": False, "python": "system", "version": "", "pip": False,
+        "requirements": {"present": False, "count": 0, "error": ""},
+    }
     if item["check_ok"] is None:
         item["check_label"] = "还没验收"
     elif item["check_ok"]:

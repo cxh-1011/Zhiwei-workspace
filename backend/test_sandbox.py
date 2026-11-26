@@ -26,6 +26,7 @@ database.init_db()
 
 import agent  # noqa: E402
 import checks  # noqa: E402
+import envs  # noqa: E402
 import projects  # noqa: E402
 import main as app_main  # noqa: E402
 from tools import _guard, get_tool  # noqa: E402
@@ -409,6 +410,35 @@ def test_http():
     no_script = api.post("/projects", json={"name": "没脚本的章", "chapter_id": "s99c9"})
     run_no = api.post("/projects/%s/check" % no_script.json()["id"])
     check("没脚本返回 404", run_no.status_code == 404, run_no.text[:120])
+
+    # 项目环境：这里不真建（十几秒），造一个「已经存在」的 venv 验接口形状。
+    # 真建 venv 与「验收跑在 venv 里」在 test_project_env.py 里验。
+    fake_py = envs._candidate_pythons(project["path"])[0]
+    os.makedirs(os.path.dirname(fake_py), exist_ok=True)
+    open(fake_py, "w").close()
+
+    env_resp = api.post("/projects/%s/env" % project["id"])
+    check("准备环境 200", env_resp.status_code == 200, env_resp.text[:160])
+    check("已有环境时 created=False", env_resp.json().get("created") is False, env_resp.json())
+    check("接口返回里项目行带 env", env_resp.json()["project"]["env"]["present"] is True,
+          env_resp.json()["project"])
+    # 按 id 找，不要假设它是列表第一项：上面已经建了第二个项目
+    listed = {item["id"]: item for item in api.get("/projects").json()["items"]}
+    check("列表也带 env", listed[project["id"]]["env"]["present"] is True,
+          listed[project["id"]].get("env"))
+
+    no_req = api.post("/projects/%s/deps" % project["id"])
+    check("没有清单时装依赖 400", no_req.status_code == 400, no_req.text[:160])
+    check("400 里说明缺什么", "requirements.txt" in no_req.text, no_req.text[:200])
+
+    with open(os.path.join(project["path"], "requirements.txt"), "w", encoding="utf-8") as fh:
+        fh.write("-e .\n")
+    bad_req = api.post("/projects/%s/deps" % project["id"])
+    check("清单不合法时 400", bad_req.status_code == 400, bad_req.text[:200])
+    check("400 指到第几行", "第 1 行" in bad_req.text, bad_req.text[:200])
+
+    check("环境接口对不存在的项目 404", api.post("/projects/99999/env").status_code == 404)
+    check("依赖接口对不存在的项目 404", api.post("/projects/99999/deps").status_code == 404)
 
     check("不存在的项目 404", api.get("/projects/99999").status_code == 404)
     check("坏名字 400", api.post("/projects", json={"name": ""}).status_code == 422)

@@ -8,9 +8,11 @@ import 它，一次 `while True` 就把整个后端拖死，而且没法超时�
 
 为什么用同一个解释器
 --------------------
-`sys.executable` 就是跑后端的那个 Python。用系统 python 会踩到「学生用 3.11 写的
-语法，验收跑在 3.8 上」这种假失败；而项目级 venv 是刻意不做的——见
-docs/plan-sandbox.md 里的取舍说明。
+项目有 `.venv` 就用它，没有才落回 `sys.executable`（跑后端的那个 Python）。
+这不是「顺便」：学生在项目里 `pip install` 之后，验收必须能看到那个包，
+否则「明明装了却 import 不到」会变成他完全无法诊断的失败。反过来，用系统
+python 也会踩到「学生用 3.11 写的语法，验收跑在 3.8 上」。两条都由
+`envs.python_for()` 兜住，这里不要自己拼解释器路径。
 
 脚本契约（故意做得笨）
 ----------------------
@@ -29,9 +31,9 @@ import os
 
 import signal
 import subprocess
-import sys
 import time
 
+import envs
 from course import CURRICULUM_ROOT, DEFAULT_COURSE
 
 DEFAULT_TIMEOUT = 90
@@ -186,10 +188,12 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
         raise CheckError("项目目录不存在：%s" % target)
 
     timeout = max(5, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
+    # 项目有自己的 venv 就用它：学生在里面装的包，验收必须看得见
+    python, python_source = envs.python_for(target)
     started = time.monotonic()
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-X", "utf8", str(script), target],
+            [python, "-X", "utf8", str(script), target],
             cwd=target,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -222,6 +226,7 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
         return {
             "available": True, "ok": False, "passed": 0, "total": 0,
             "items": [], "elapsed_ms": elapsed, "timed_out": True,
+            "python_source": python_source,
             "error": "验收超过 %d 秒没结束，已终止。检查一下有没有死循环或阻塞的网络请求。" % timeout,
             "stdout": out, "stderr": err[-2000:],
         }
@@ -231,6 +236,7 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
         return {
             "available": True, "ok": False, "passed": 0, "total": 0,
             "items": [], "elapsed_ms": elapsed, "timed_out": False,
+            "python_source": python_source,
             "error": "验收脚本没有输出结果（最后一行不是合法 JSON）。"
                      "这是验收脚本的问题，不是你代码的问题；下面是对应输出。",
             "stdout": out[-4000:], "stderr": err[-2000:],
@@ -241,6 +247,9 @@ def run(project_path, chapter_id, course_id=DEFAULT_COURSE, timeout=DEFAULT_TIME
         "available": True,
         "elapsed_ms": elapsed,
         "timed_out": False,
+        # 验收跑在哪个解释器上：前端据此显示「项目环境 / 默认环境」，
+        # 也是排查「装了包却说没装」时第一个要看的东西
+        "python_source": python_source,
         "error": "",
         # 只有在没过的时候才把原始输出带回去：过了还塞 4KB 日志纯属噪音
         "stdout": "" if result["ok"] else out[-4000:],

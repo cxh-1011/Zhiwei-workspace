@@ -456,6 +456,19 @@ def _sandbox_prompt(project: dict, check_available: bool) -> str:
         "教学上仍然是导师：先让他自己写，卡住了给最小可运行的片段，别整文件覆盖他的代码。"
         "他明确说「你直接写」时再动手——那时也在他的文件上改，不要新建一个同名副本。"
     )
+    env = project.get("env") or {}
+    if env.get("present"):
+        lines.append(
+            "这个项目有自己的 Python 环境（.venv）：`python`、`pip`、`pytest` 都自动跑在它里面，"
+            "命令里直接写 `python main.py`，不要写 `.venv/Scripts/python.exe` 这种路径。"
+        )
+    else:
+        lines.append(
+            "这个项目还没有独立环境，`python` 用的是后端那个解释器。"
+            "需要第三方包时，先把包写进 `requirements.txt`（一行一个），"
+            "再让用户点页面上的「准备环境」和「装依赖」——不要在对话里自己装，"
+            "那样装到哪个解释器、重装时怎么复原都说不清。"
+        )
     return "\n".join(lines)
 
 

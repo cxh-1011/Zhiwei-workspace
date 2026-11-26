@@ -1070,6 +1070,28 @@ button { cursor: pointer; }
 .proj-on { color: var(--accent); }
 .proj-gone { color: #b4513f; }
 
+/* 环境状态与两个小按钮：放在路径旁边，因为它解释的是「这条路径里的代码
+   跑在哪个 Python 上」。做成胶囊的样子，不跟主行的「跑验收」抢注意力。 */
+.proj-env {
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1.6;
+  padding: 1px 8px;
+  border: 1px dashed #d8dbe6;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.proj-env:hover { border-color: #c9d0f4; color: var(--accent); }
+.proj-env.on {
+  border-style: solid;
+  background: var(--accent-soft);
+  color: #4a5ec4;
+  cursor: default;
+}
+.proj-env.bad { border-color: #eccfca; color: #b4513f; cursor: default; }
+
 /* 验收结果贴在行里：改一轮跑一次，上下两次能直接对比 */
 .proj-check {
   margin-top: 9px;

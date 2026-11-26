@@ -333,13 +333,40 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def _project_python() -> str:
+    """沙箱里该用哪个解释器：项目有 .venv 就用它，否则还是后端这个。
+
+    只在沙箱里换（活动根 ≠ 仓库根）。开发模式下把 `python` 悄悄换成仓库的
+    .venv 是一个没人要求过的副作用，而写文件工具的用户期待的是同一个环境。
+    """
+    root = _guard.active_root()
+    if os.path.normcase(root) == os.path.normcase(_guard.base_root()):
+        return sys.executable
+    try:
+        import envs
+        return envs.python_for(root)[0]
+    except Exception:
+        # 环境模块出问题不该让整个命令工具坏掉；退回默认解释器，行为同以前
+        return sys.executable
+
+
 def _resolve_argv(tokens: list[str]) -> list[str]:
-    """把 python / pytest 换成当前解释器，免得模型调到一个没装依赖的系统 Python。"""
+    """把 python / pip / pytest 换成活动项目的解释器。
+
+    为什么必须连 pip 一起换：学生在项目里跑 `pip install requests`，装进了
+    系统 Python，而验收用项目 venv 跑——于是「明明装了却 import 不到」。
+    这个失败对刚学写代码的人几乎无法自己诊断，所以工具端直接消掉它。
+    """
     exe = _exe_name(tokens[0])
+    python = _project_python()
     if exe in PYTHON_EXES:
-        return [sys.executable] + tokens[1:]
-    if exe in ("pytest", "py.test") and shutil.which(tokens[0]) is None:
-        return [sys.executable, "-m", "pytest"] + tokens[1:]
+        return [python] + tokens[1:]
+    # 没有项目环境时保持原命令：PATH 上的 pip 能跑，不该被换成 python -m pip
+    if exe in ("pip", "pip3") and python != sys.executable:
+        return [python, "-m", "pip"] + tokens[1:]
+    if exe in ("pytest", "py.test"):
+        if python != sys.executable or shutil.which(tokens[0]) is None:
+            return [python, "-m", "pytest"] + tokens[1:]
     return list(tokens)
 
 
