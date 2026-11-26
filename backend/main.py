@@ -1263,6 +1263,19 @@ def get_diagnostic(course_id: str = course_lib.DEFAULT_COURSE):
     }
 
 
+@app.get("/profile")
+def get_profile(course_id: str = course_lib.DEFAULT_COURSE):
+    """能力画像：10 个阶段各自的等级、依据、时间，以及章节实测的反面证据。
+
+    单独一个接口而不是塞进 /course：目录每刷一次都会拉 /course，而画像要读
+    题库文件、统计作答、算过期天数，属于「点开画像才该付的钱」。
+    """
+    try:
+        return profile_lib.overview(course_id)
+    except course_lib.CourseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 class DiagnosticSubmitRequest(BaseModel):
     # 键是 d1/d2…，值是作答。整体一次交，不逐题提交——
     # 诊断要的是「这一刻的水平」，边答边看结果会影响后面的题。

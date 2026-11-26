@@ -224,10 +224,17 @@ function diagnosticCardHtml() {
   const text = last
     ? '知道该从哪开始了。换台设备或过一阵可以重测'
     : '先测一下你已经会到哪，不然排进度只能靠猜';
+  // 测过之后才给画像入口：10 行全是「未测」的画像没有信息量。
+  const actions = last
+    ? `<div class="diag-card-actions">
+        <button id="diagGo">重新测一次</button>
+        <button id="diagProfile">能力画像</button>
+      </div>`
+    : '<button id="diagGo">开始摸底</button>';
   return `<div class="diag-card">
     <small>${escapeHtml(sub)}</small>
     <b>${escapeHtml(text)}</b>
-    <button id="diagGo">${last ? '重新测一次' : '开始摸底'}</button>
+    ${actions}
   </div>`;
 }
 
@@ -271,6 +278,8 @@ function renderTocFoot() {
   el('tocFoot').innerHTML = diagnosticCardHtml() + nextCardHtml();
   const diagGo = el('diagGo');
   if (diagGo) diagGo.addEventListener('click', openDiagnostic);
+  const diagProfile = el('diagProfile');
+  if (diagProfile) diagProfile.addEventListener('click', openProfile);
   const nextGo = el('nextGo');
   if (nextGo) nextGo.addEventListener('click', () => state.course.next && openChapter(state.course.next.id));
 }
@@ -759,11 +768,104 @@ function renderDiagnosticResult(result) {
   el('diagAgain').addEventListener('click', () => {
     if (state.diagInfo) renderDiagnostic(state.diagInfo);
   });
-  el('diagBack').addEventListener('click', () => {
-    const next = state.course.next;
-    if (next) openChapter(next.id);
-    else openChapter((state.course.chapters[0] || {}).id);
-  });
+  el('diagBack').addEventListener('click', backToCourse);
+}
+
+/* ---------------- 能力画像 ---------------- */
+
+function ageText(days) {
+  if (days === null || days === undefined) return '';
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  return `${days} 天前`;
+}
+
+function backToCourse() {
+  const next = state.course.next;
+  openChapter(next ? next.id : (state.course.chapters[0] || {}).id);
+}
+
+/* 画像和诊断结果是两张页：结果页回答「这次考成什么样」，画像页回答「现在会到哪」。
+   后者要能随时点开，因为它是推荐、跳章、导师说话的共同依据——看不见依据，
+   用户就只能相信或怀疑系统，没法核对。 */
+async function openProfile() {
+  state.view = 'profile';
+  state.chapterId = '';
+  location.hash = 'profile';
+  closeDrawers();
+  el('tutorWhere').textContent = '正在看能力画像';
+  el('tutorLog').innerHTML = `<div class="tutor-hint">
+    <p>画像决定推荐绕开哪几段。看到不对的地方，最直接的改法是去那一章答题——
+    <b>章节实测能推翻诊断</b>，答错了那一章就会重新排回推荐。</p>
+  </div>`;
+  el('tutorQuick').innerHTML = '';
+  el('readerInner').innerHTML = '<div class="empty-state"><p>正在读画像…</p></div>';
+  try {
+    renderProfile(await api('/profile'));
+  } catch (error) {
+    el('readerInner').innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function renderProfile(data) {
+  const stages = data.stages || [];
+  const last = data.last;
+  const maxLevel = Math.max(1, data.max_level || 3);
+  const rows = stages.map((row) => {
+    const bar = Math.round((row.level / maxLevel) * 100);
+    const parts = [];
+    if (row.level > 0) {
+      parts.push(`${escapeHtml(row.source_label || '来源不明')} · ${escapeHtml(row.evidence || '没写依据')}`);
+      const age = ageText(row.age_days);
+      if (age) parts.push(age);
+    } else {
+      parts.push('还没测过');
+    }
+    const quiz = row.quiz || {};
+    if (quiz.with_quiz) {
+      // 覆盖度必须写出来：只答过 1 章就说「这阶段会了」，和答完 3 章不是一回事
+      parts.push(`实测 ${quiz.tested}/${quiz.with_quiz} 章答过、全过 ${quiz.fully_passed} 章`);
+    }
+    const tags = [];
+    if (row.challenged) tags.push('<span class="pf-tag warn">实测没过</span>');
+    else if (row.skip) tags.push('<span class="pf-tag skip">跳过中</span>');
+    if (row.stale) tags.push('<span class="pf-tag stale">该复核</span>');
+    return `<div class="pf-row${row.level ? '' : ' empty'}">
+      <div class="pf-head">
+        <span class="pf-name">${row.no}. ${escapeHtml(row.title)}</span>
+        <span class="pf-lv">${escapeHtml(row.level ? row.label : '未测')}</span>
+      </div>
+      <span class="pf-bar"><i style="width:${bar}%"></i></span>
+      <div class="pf-meta">${parts.join(' · ')}${tags.join('')}</div>
+    </div>`;
+  }).join('');
+
+  el('readerInner').innerHTML = `
+    <div class="reader-top">
+      <span class="stage-tag">能力画像</span>
+      <span>${stages.length} 个阶段</span>
+      ${last ? `<span>·</span><span>最近摸底 ${escapeHtml(ageText(last.age_days) || last.at || '')}</span>` : ''}
+    </div>
+    <h1 class="diag-title">你现在会到哪</h1>
+    <p class="diag-desc">${last
+      ? `上次摸底答对 ${last.correct}/${last.total}。`
+      : '还没做过摸底，下面是空白画像。'}画像不是评分，是推荐和导师共用的依据，
+      每一行都写着它凭什么这么判。</p>
+
+    <div class="pf-list">${rows}</div>
+    <p class="diag-note">等级：未测 → 听过 → 能写 → 能讲。摸底只有选择题和填空题，最高判到「能写」；
+      「能讲」得靠章节里的开放题。标<b>跳过中</b>的段，推荐会绕开它们。标<b>实测没过</b>的，
+      是诊断说你会、但章节题没做对——那几章已经重新排回推荐，跳不过去了。
+      结论超过 ${data.stale_days} 天仍在使用，但会打上<b>该复核</b>。</p>
+
+    <div class="diag-actions">
+      <button class="btn primary" id="pfAgain">重新测一次</button>
+      <button class="btn" id="pfBack">回到课程</button>
+    </div>`;
+
+  el('reader').scrollTop = 0;
+  el('pfAgain').addEventListener('click', openDiagnostic);
+  el('pfBack').addEventListener('click', backToCourse);
 }
 
 /* ---------------- 导师 ---------------- */
@@ -987,6 +1089,10 @@ async function boot() {
     openDiagnostic();
     return;
   }
+  if (fromHash === 'profile') {
+    openProfile();
+    return;
+  }
   const known = (state.course.chapters || []).some((c) => c.id === fromHash);
   const target = known ? fromHash : (state.course.next && state.course.next.id);
   if (target) openChapter(target);
@@ -999,6 +1105,10 @@ async function boot() {
     const want = (location.hash || '').replace('#', '');
     if (want === 'diagnostic') {
       if (state.view !== 'diagnostic') openDiagnostic();
+      return;
+    }
+    if (want === 'profile') {
+      if (state.view !== 'profile') openProfile();
       return;
     }
     if (want && want !== state.chapterId) openChapter(want);

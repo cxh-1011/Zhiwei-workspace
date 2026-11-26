@@ -696,6 +696,35 @@ button { cursor: pointer; }
   font-size: 10px;
 }
 .diag-card button:hover { background: #f7f8ff; border-color: #c8cdf0; }
+.diag-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.diag-card-actions button { margin-top: 7px; }
+
+/* ---------- 能力画像 ---------- */
+
+.pf-list { display: grid; gap: 9px; margin: 18px 0 0; }
+.pf-row { padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 9px; background: #fff; }
+/* 未测的段不隐藏：空白本身是信息——这十段里他还没测过哪几段 */
+.pf-row.empty { border-style: dashed; background: #fbfbfd; }
+.pf-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.pf-name { color: #2b3140; font-size: 12.5px; }
+.pf-lv { color: #5b63a8; font-size: 10.5px; }
+.pf-row.empty .pf-lv { color: var(--muted-2); }
+.pf-bar { display: block; height: 4px; margin: 7px 0 6px; border-radius: 3px; background: #eef0f8; overflow: hidden; }
+.pf-bar i { display: block; height: 100%; background: #7b86e8; }
+.pf-meta { color: var(--muted); font-size: 10.5px; line-height: 1.75; }
+.pf-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid #e3e6ef;
+  border-radius: 3px;
+  background: #f7f8fb;
+  color: #7a8190;
+  font-size: 9.5px;
+}
+.pf-tag.skip { border-color: #dcdef2; background: #f4f5ff; color: #5b63a8; }
+.pf-tag.warn { border-color: #f0dfd2; background: #fdf6f0; color: #a2603a; }
+.pf-tag.stale { border-color: #eee2c4; background: #fdfaef; color: #8a7635; }
 
 /* ---------- 摸底诊断页 ---------- */
 

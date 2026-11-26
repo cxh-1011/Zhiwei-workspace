@@ -382,6 +382,26 @@ def tutor_context(course_id: str, chapter_id: str | None = None) -> str:
             % (stages, len(skip["chapters"]))
         )
 
+    # 画像要说具体等级，不能只说「跳过哪几段」：导师讲题得知道他是「听过」
+    # 还是「能写」。overview 只读不写，且全部包在 try 里——画像是锦上添花，
+    # 读不出来不能把整段对话拖垮。
+    try:
+        import profile as profile_lib
+        rows = profile_lib.overview(course_id)["stages"]
+    except Exception:
+        rows = []
+    measured = [row for row in rows if int(row.get("level") or 0) > 0]
+    if measured:
+        lines.append("能力画像：%s。" % "、".join(
+            "%s %d 级「%s」（%s）" % (row["title"], row["level"], row["label"],
+                                     row["source_label"] or "来源不明")
+            for row in measured))
+    # 实测推翻的那几段必须点出来，否则导师会照着「2 级」继续劝他跳过
+    challenged = [row for row in rows if row.get("challenged")]
+    if challenged:
+        lines.append("其中 %s 诊断判了 2 级，但章节实测有题没过，那几章已经重新排回推荐，"
+                     "别再劝他跳过。" % "、".join(row["title"] for row in challenged))
+
     nxt = course.get("next")
     if nxt and course.get("next_fallback"):
         lines.append(
