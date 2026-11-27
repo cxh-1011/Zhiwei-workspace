@@ -1979,6 +1979,25 @@ async function sendMessage() {
 // 十、添加消息
 // =============================
 
+// 空对话时把问候语和输入框一起提到页面中间，像 codex 那样只有一句话和一个框。
+// 用 MutationObserver 而不是在每处手动调：有消息写入的路径有六七条（发送、流式
+// 回答、打开历史、清空、删会话、加载失败提示），漏一处就会出现「已经有消息，
+// 输入框还悬在页面中间」。观察 childList 就够，节点只增删不改文本。
+function updateEmptyState() {
+    const shell = document.querySelector(".app-shell");
+    const box = $("chat");
+    if (!shell || !box) return;
+    shell.classList.toggle("is-empty", !box.querySelector(".user, .ai"));
+}
+
+function watchEmptyState() {
+    const box = $("chat");
+    if (!box || box.dataset.emptyWatched) return;
+    box.dataset.emptyWatched = "1";
+    new MutationObserver(updateEmptyState).observe(box, { childList: true });
+    updateEmptyState();
+}
+
 function addMessage(role, text) {
 
     const box = $("chat");
@@ -2267,9 +2286,9 @@ function clearChat() {
 
         if ($("currentTitle")) $("currentTitle").textContent = "新对话";
 
-        // 欢迎页不再让用户先选功能，直接给一个能打字的输入框。
+        // 欢迎页不再让用户先选功能：只有一句问候，输入框就在下面。
         // 模板在启动时从页面里存一份，改文案只改 index.html 一处。
-        box.innerHTML = welcomeTemplate || '<div id="welcome" class="welcome"><h1>你好，今天想用 AI 做什么？</h1><p>直接说你想做什么，我会自己判断该读文件、读论文还是普通对话。</p></div>';
+        box.innerHTML = welcomeTemplate || '<div id="welcome" class="welcome"><h1>今天想做什么？</h1><p>直接说就行。要读文件、读论文，还是只是聊聊，我自己判断。</p></div>';
         if ($("currentTitle")) $("currentTitle").textContent = "新对话";
         activeMode = "auto";
         pendingMaterial = "";
@@ -3013,6 +3032,7 @@ document.addEventListener(
         // 存一份欢迎页结构，新建对话时复原用。
         welcomeTemplate = $("welcome") ? $("welcome").outerHTML : "";
         selectMode("auto", { keepWelcome: true });
+        watchEmptyState();
         checkAuthentication();
 
     }
