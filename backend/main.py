@@ -399,12 +399,24 @@ def _chat_context(message: Message) -> dict:
         if role in {"user", "ai"}
     ]
     memory_context = _memory_context()
+    # 画像只用来决定讲多深：问答与学习模式都要，文件/论文模式不掺和——
+    # 那两种是「读这份材料」，不是「教他这门课」，硬套讲解口径只会让答案走样。
+    profile_context = ""
+    if message.mode in {"chat", "tutor"}:
+        profile_context = profile_lib.style_hint(
+            message.course_id or course_lib.DEFAULT_COURSE,
+            # 问题文本用来定位「这题属于哪一段」，定位不到才退回当前章节。
+            # 定位放在程序里做：让模型自己判断，它会按题型猜档，而不是按人猜档。
+            question=message.text,
+            chapter_id=(message.chapter_id or "") if message.mode == "tutor" else "",
+        )
 
     return {
         "history": history,
         "filename": selected_filename,
         "image_path": image_path,
         "memory_context": memory_context,
+        "profile_context": profile_context,
         "project": project,
     }
 
@@ -427,6 +439,7 @@ def chat(message: Message):
                 message.text, history=ctx["history"], mode=message.mode,
                 filename=ctx["filename"], image_path=ctx["image_path"],
                 memory_context=ctx["memory_context"],
+                profile_context=ctx["profile_context"],
                 allow_writes=message.allow_writes,
                 allow_workspace=message.allow_workspace,
                 allow_code_edit=message.allow_code_edit,
@@ -472,6 +485,7 @@ def chat_stream(message: Message):
                     message.text, history=ctx["history"], mode=message.mode,
                     filename=ctx["filename"], image_path=ctx["image_path"],
                     memory_context=ctx["memory_context"],
+                    profile_context=ctx["profile_context"],
                     allow_writes=message.allow_writes,
                     allow_workspace=message.allow_workspace,
                     allow_code_edit=message.allow_code_edit,

@@ -4,6 +4,9 @@
 - `quiz.score_diagnostic()` 只算分，纯函数，不碰库；
 - 本模块负责把分数变成「档案」：存这次诊断、按阶段写画像。
 
+画像有两个去处：排期绕开已会的阶段，对话按他的基础决定讲多深（`style_hint`）。
+后者只影响措辞，不改任何学习记录。
+
 刻意**不写 course_progress**。诊断判 level 2 的意思是「这一段可以跳过」，
 一旦把它写成「这些章学完了」，进度条会瞬间跳到 60%，而用户一章正文都没读。
 真正该做的是让排期器绕开这些章（第三优先），不是伪造学习记录。
@@ -11,6 +14,7 @@
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 
 import database
@@ -212,3 +216,124 @@ def overview(course_id):
             "challenged": sum(1 for row in rows if row["challenged"]),
         },
     }
+
+
+# ---------- 对话里的讲解口径 ----------
+
+# 画像的用处不止「跳过哪几段」：同一句「token 是什么」，对 1 级的人要从
+# 「你每天打字发微信」说起，对 3 级的人一句「切词后的最小单位，决定上下文长度」
+# 就够了。
+#
+# 这段是被真机反复打回来才定成这样的，结论有两条：
+#
+# ① 档位必须由程序定。把三档并列交给模型，它不会按「这个人会不会」选，而是按
+#    「这题看起来基础不基础」选——问 s1 的 token 时，明明 s1 没测过，它照样用
+#    术语讲，还顺手把「你是 2 级」写进回答。
+# ② 指令必须短。同一段 600 字的讲解要求，接在 SYSTEM_PROMPT 后面，模型照样
+#    输出 1300 字、带 emoji 和表格；压成「不要 emoji、表格、小标题，200 字内」
+#    这一句，立刻变成 185 字的白话。长指令会被长提示淹没，短指令才落地。
+#
+# 所以这里只留一句格式要求，不列等级表、不写理由、不给示例。等级只在句首出现
+# 一次，并且明令不许念给用户。
+LEVEL_RULES = {
+    0: "一段话，150 字内：先说它解决什么问题，配一个他日常见过的场景，术语第一次出现就解释。",
+    2: "先一句定义和适用边界，再给机制或最短可跑代码，500 字内；不打比方、不复述入门概念。",
+    3: "一句话结论，再最多三条取舍或坑，200 字内；不解释定义、不铺垫。",
+}
+# 1 级按 0 级写：听过和没听过，在「要不要解释术语」上没有区别。
+LEVEL_RULES[1] = LEVEL_RULES[0]
+
+# 问题定位不用章节文本打分：试过 recall 的二元组匹配，短问句命中率太低——
+# 「怎么让模型调用工具」一章都匹配不到，「ReAct 是什么」还会被《多智能体真有用吗》
+# 抢走。关键词表是手写的，但可测、可解释、零延迟；换课程时要跟着换。
+STAGE_KEYWORDS = {
+    "s1": ("token", "上下文窗口", "上下文", "embedding", "向量", "采样", "temperature",
+           "注意力", "幻觉", "词表"),
+    "s2": ("提示词", "prompt", "system prompt", "few-shot", "少样本", "结构化输出", "json"),
+    "s3": ("工具调用", "调用工具", "function calling", "tool call", "工具", "参数 schema"),
+    "s4": ("react", "agent 循环", "循环", "规划", "plan", "反思", "观察", "推理链"),
+    "s5": ("记忆", "memory", "长期记忆", "召回", "遗忘"),
+    "s6": ("rag", "检索", "知识库", "切块", "chunk", "重排", "rerank", "向量库"),
+    "s7": ("工程化", "部署", "重试", "超时", "并发", "成本", "日志", "可观测", "缓存"),
+    "s8": ("评测", "评估", "eval", "benchmark", "准确率", "回归", "打分"),
+    "s9": ("多智能体", "multi-agent", "编排", "workflow", "langgraph"),
+    "s10": ("收尾", "作品", "上线", "项目演示"),
+}
+
+
+def _hit(word, text):
+    """英文词按词边界，中文按子串：否则 react 会在 reaction、plan 会在 planet 里命中。"""
+    word = word.lower()
+    if word.isascii():
+        return re.search(r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(word), text) is not None
+    return word in text
+
+
+def _stage_by_keywords(question):
+    """命中词最多的那一段；平票取更靠前的（更基础，宁可讲细一点）。"""
+    text = str(question or "").lower()
+    if not text.strip():
+        return ""
+    best, best_hits = "", 0
+    for stage, words in STAGE_KEYWORDS.items():
+        hits = sum(1 for word in words if _hit(word, text))
+        if hits > best_hits:
+            best, best_hits = stage, hits
+    return best
+
+
+def _stage_for_question(question="", chapter_id="", course_id=None):
+    """问题属于哪一段：先看关键词，问不出来再用他打开的那一章。"""
+    stage = _stage_by_keywords(question)
+    if stage:
+        return stage
+    if chapter_id:
+        try:
+            chapters = course_lib.decorate(course_lib.load_course(course_id))["chapters"]
+        except Exception:
+            return ""
+        chapter = next((c for c in chapters if c.get("id") == chapter_id), None)
+        if chapter:
+            return str(chapter.get("stage") or "")
+    return ""
+
+
+def style_hint(course_id, with_levels=True, question="", chapter_id=""):
+    """一句话说明这次该怎么讲。没测过（全 0）返回空串，不做任何猜测。
+
+    没测过就不注入，是这条功能的边界：模型宁愿中性作答，也不能因为「看不出来」
+    就自己给用户安一个水平——那等于凭语气猜学历。
+
+    with_levels 只为兼容调用方保留：等级表已经整段删掉，它既稀释那句关键的
+    格式要求，也没有实际作用（模型只需要本次这一档）。导师模式的等级事实由
+    course.tutor_context 提供。
+    """
+    try:
+        data = overview(course_id)
+    except Exception:
+        return ""  # 旧库没画像表：当作没测过，对话照常
+    if not any(int(row.get("level") or 0) > 0 for row in data["stages"]):
+        return ""
+
+    target = _stage_for_question(question, chapter_id, course_id)
+    row = next((item for item in data["stages"] if item["id"] == target), None) if target else None
+    if row is None:
+        # 闲聊、写作、改代码不该被套上教学口吻；只有明显在问课程概念时才退回入门档。
+        return ("【讲解格式 · 内部，别念出来】没定位到题目属于哪一段：如果是课程概念，"
+                "按入门讲——" + LEVEL_RULES[0] + "不是课程内容就正常回答。"
+                "不要 emoji、表格、小标题。")
+
+    level = int(row.get("level") or 0)
+    # 诊断说会、实测没过的那几段按 1 级讲：他听过，但没写出来过。
+    if row.get("challenged"):
+        level = min(level, 1)
+    if level <= 0:
+        head = "本题属第 %s 段 %s，这一段还没测过。" % (row["no"], row["title"])
+    else:
+        head = "本题属第 %s 段 %s，他 %d 级。" % (row["no"], row["title"], level)
+    if row.get("stale"):
+        # 只加四个字：过期结论不该当成刚测的，但也不值得为此多写一句。
+        head += "（这条测得较早）"
+    return ("【讲解格式 · 内部，别念出来】" + head + "按这个写："
+            + LEVEL_RULES.get(level, LEVEL_RULES[0])
+            + "不要 emoji、表格、小标题，也不要提等级。")

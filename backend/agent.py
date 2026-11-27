@@ -553,6 +553,9 @@ def run_agent_stream(
     filename: str | None = None,
     image_path: str | None = None,
     memory_context: str = "",
+    # 能力画像的讲解口径（见 profile.style_hint）。和 memory_context 分开传：
+    # 记忆是「他说过什么」，画像是「他懂到哪」，混成一段模型容易把等级当原话复述。
+    profile_context: str = "",
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
@@ -662,6 +665,11 @@ def run_agent_stream(
         "web_used": {"search": 0, "fetch": 0},
     }
     prompt = SYSTEM_PROMPT
+    if profile_context:
+        # 放最前面，不是跟记忆一起塞在末尾。实测同样的口径：放在 1000 多字的
+        # 基础提示后面时，模型照样用小标题、emoji、写 700 字；挪到最前面
+        # 就变成一段话、400 字、没有符号标记。位置比措辞更管用。
+        prompt = "【内部设置 · 不要复述】\n" + profile_context[:1800] + "\n\n" + prompt
     if mode == "file":
         if image_path:
             prompt += "\n当前是图片问答。用户上传的图片已作为视觉输入附在当前问题中；请直接观察图片并依据图像内容回答，不要调用文本文件检索工具。看不清或无法确认的内容要明确说明。"
@@ -1294,6 +1302,9 @@ def run_agent(
     filename: str | None = None,
     image_path: str | None = None,
     memory_context: str = "",
+    # 能力画像的讲解口径（见 profile.style_hint）。和 memory_context 分开传：
+    # 记忆是「他说过什么」，画像是「他懂到哪」，混成一段模型容易把等级当原话复述。
+    profile_context: str = "",
     allowed_tools: list[str] | None = None,
     allow_writes: bool = False,
     allow_workspace: bool = False,
@@ -1314,6 +1325,7 @@ def run_agent(
         filename=filename,
         image_path=image_path,
         memory_context=memory_context,
+        profile_context=profile_context,
         allowed_tools=allowed_tools,
         allow_writes=allow_writes,
         allow_workspace=allow_workspace,

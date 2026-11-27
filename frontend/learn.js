@@ -850,7 +850,8 @@ async function openProfile() {
   closeDrawers();
   el('tutorWhere').textContent = '正在看能力画像';
   el('tutorLog').innerHTML = `<div class="tutor-hint">
-    <p>画像决定推荐绕开哪几段。看到不对的地方，最直接的改法是去那一章答题——
+    <p>画像决定推荐绕开哪几段，也决定对话讲多深：没测过、只是听过的段落从比方讲起，
+    能写出来的直接用术语。看到不对的地方，最直接的改法是去那一章答题——
     <b>章节实测能推翻诊断</b>，答错了那一章就会重新排回推荐。</p>
   </div>`;
   el('tutorQuick').innerHTML = '';
@@ -911,7 +912,9 @@ function renderProfile(data) {
     <p class="diag-note">等级：未测 → 听过 → 能写 → 能讲。摸底只有选择题和填空题，最高判到「能写」；
       「能讲」得靠章节里的开放题。标<b>跳过中</b>的段，推荐会绕开它们。标<b>实测没过</b>的，
       是诊断说你会、但章节题没做对——那几章已经重新排回推荐，跳不过去了。
-      结论超过 ${data.stale_days} 天仍在使用，但会打上<b>该复核</b>。</p>
+      结论超过 ${data.stale_days} 天仍在使用，但会打上<b>该复核</b>。
+      对话也按这份等级挑讲法：入门先打个比方、术语第一次出现就解释，能写直接给定义和代码，
+      能讲只说结论和取舍；等级本身不会出现在回答里。</p>
 
     <div class="diag-actions">
       <button class="btn primary" id="pfAgain">重新测一次</button>
