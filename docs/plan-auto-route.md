@@ -86,18 +86,55 @@
 入口——点哪张都只是给下一次提问预设一个模式。留着反而是误导：卡片暗示「要先
 决定用哪个功能」，而这正是这次要消掉的东西。
 
-现在首页只有一句问候和一个输入框，整块垂直居中，像 codex 那样打开即对话：
+现在首页只有一个图标、一行「今天想做什么？」和一个输入框，整块垂直居中，
+像 codex 那样打开即对话。原来标题下面那句「要读文件、读论文，还是只是聊聊，
+我自己判断」也删了——把后台规则讲给用户听，等于提醒他这里有个需要理解的分流。
 
-- 删掉 `index.html` 的 `.mode-grid` 三张卡，以及 `style.css` 里 `.mode-card` /
-  `.mode-icon` / `.mode-arrow` 的全部规则（含两处 media query）。
+- 删掉 `index.html` 的 `.mode-grid` 三张卡与那段说明，以及 `style.css` 里
+  `.mode-card` / `.mode-icon` / `.mode-arrow` 的全部规则（含两处 media query）。
 - 空态用 `.app-shell.is-empty` 这个状态类切版式：`#chat` 与输入区各吃一份剩余
   空白（`margin-top:auto` / `margin-bottom:auto`），问候语和输入框因此贴在一起
   落在页面中间；一有消息就退出空态，输入框回底部。
 - 状态类由 `MutationObserver` 盯着 `#chat` 的 childList 自动切换。有消息写入的
   路径有六七条（发送、流式回答、打开历史、清空、删会话、加载失败），逐个手调
   一定会漏。
-- 手动指定没有消失，只是降级成输入框左上方那个「✦ 自动选择」下拉。
+
+### 10.1 「自动选择」那行也藏了，手动入口挪到标签上
+
+`#activeModeButton` 加了 `hidden`，`updateModeBar()` 只在有文件名或附件按钮时
+才露出这一行——默认整个栏不占位。原来的下拉菜单挪到 `<body>` 下（还留在
+`modeBar` 里的话，父级 `hidden` 会让它一起消失），改 `position:fixed`，点消息
+下方的「自动 · 文件问答」标签时按标签位置弹出，靠近视口底部则朝上开。
+
+这样误判仍有出口：标签本身就是「我按文件理解了」的声明，点一下换掉即可。
+`selectMode` 里的手动路径、`MODE_INFO` 的三套占位文案都原样保留。
+
+### 10.2 一个必须记住的坑：MutationObserver 会被自己触发
+
+`updateModeBar()` 观察 `modeBar` 的 `hidden` 属性，同时又在回调里设置
+`bar.hidden`。第一版写的是无脑赋值：
+
+```js
+bar.hidden = !(hasContext || hasAction);
+```
+
+看起来值相同就不会触发，但 `el.hidden = true` 即使值没变也会走 `setAttribute`，
+MutationObserver 照样收到记录 → 回调再赋值 → 永远循环。表现是页面白屏、
+`Runtime.evaluate` 30 秒无响应、Edge 报 `Abnormal renderer termination`，
+`node --check` 完全看不出来（语法没错，是运行时自杀）。
+
+修法是写之前先比：
+
+```js
+const want = !(hasContext || hasAction);
+if (bar.hidden !== want) bar.hidden = want;
+```
+
+顺带一条判据：凡是「观察属性 + 在回调里改同一属性」的代码，赋值前必须比一次，
+否则就是自激循环。诊断时最快的办法是把观察者停掉再截图——停掉就恢复，基本可以
+定位到这一处。
 
 验收：`backups/ui_smoke/probe_empty.py` 15 项（无卡片、空态居中在 60px 内、
 有消息后输入框回底、清空后欢迎页只出现一次、窄屏不塌）；`probe_route.py` 由
-30 项改为 31 项（原「三张卡还在」改成「三张卡已删除」+「进入空态」）。
+31 项增到 34 项（三张卡已删除、空态、自动按钮隐藏、欢迎页只剩问候、有附件时
+模式栏才出现、点标签唤起菜单并贴住标签、点别处收起）。

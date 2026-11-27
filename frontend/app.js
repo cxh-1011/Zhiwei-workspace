@@ -1716,9 +1716,18 @@ function addRouteTag(mode, reason) {
     tag.className = "route-tag";
     tag.textContent = "自动 · " + info.name + (reason ? " · " + reason : "");
     tag.title = "点一下可以改成别的功能";
-    tag.addEventListener("click", () => {
-        selectMode(mode);
-        if ($("modePicker")) $("modePicker").hidden = false;
+    // 下拉按钮已经收起来了，误判时的出口就剩这一个标签：点它弹菜单，
+    // 位置按标签算，靠近页面底部时朝上开，免得菜单跑到视口外。
+    tag.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const picker = $("modePicker");
+        if (!picker) return;
+        const rect = tag.getBoundingClientRect();
+        const height = 148;
+        const openUp = rect.bottom + 6 + height > window.innerHeight;
+        picker.hidden = false;
+        picker.style.left = Math.round(rect.left) + "px";
+        picker.style.top = Math.round(Math.max(8, openUp ? rect.top - height - 6 : rect.bottom + 6)) + "px";
     });
     chat.appendChild(tag);
 }
@@ -1996,6 +2005,35 @@ function watchEmptyState() {
     box.dataset.emptyWatched = "1";
     new MutationObserver(updateEmptyState).observe(box, { childList: true });
     updateEmptyState();
+}
+
+// 输入框上方那行只在真有东西可看时占位：文件名、添加资料、解析论文。
+// 「自动选择」下拉已经藏掉，所以默认情况下整行不出现——不为了一个不该让用户
+// 操心的问题，先给他一行「你要用哪个功能」。
+function updateModeBar() {
+    const bar = $("modeBar");
+    if (!bar) return;
+    const ctx = $("contextName");
+    const hasContext = Boolean(ctx && ctx.textContent.trim());
+    const hasAction = ["filePickerLabel", "fileList", "paperPickerLabel", "uploadPaperBtn"]
+        .some(id => { const el = $(id); return el && !el.hidden; });
+    // 只在真的要变时才写。el.hidden = true 即使值没变也会 setAttribute，
+    // MutationObserver 照样收到记录——watchModeBar 监听的就是这个属性，
+    // 无脑赋值会自己触发自己，把主线程挂在微任务里（Edge 会直接崩渲染进程）。
+    const want = !(hasContext || hasAction);
+    if (bar.hidden !== want) bar.hidden = want;
+}
+
+function watchModeBar() {
+    const bar = $("modeBar");
+    if (!bar || bar.dataset.modeWatched) return;
+    bar.dataset.modeWatched = "1";
+    // 附件按钮由 sendMessage / askForMaterial / loadFiles 多处改 hidden，
+    // 逐个补调用迟早漏一个，直接盯住这一行的变化。
+    new MutationObserver(updateModeBar).observe(bar, {
+        subtree: true, childList: true, attributes: true, attributeFilter: ["hidden"],
+    });
+    updateModeBar();
 }
 
 function addMessage(role, text) {
@@ -2288,7 +2326,7 @@ function clearChat() {
 
         // 欢迎页不再让用户先选功能：只有一句问候，输入框就在下面。
         // 模板在启动时从页面里存一份，改文案只改 index.html 一处。
-        box.innerHTML = welcomeTemplate || '<div id="welcome" class="welcome"><h1>今天想做什么？</h1><p>直接说就行。要读文件、读论文，还是只是聊聊，我自己判断。</p></div>';
+        box.innerHTML = welcomeTemplate || '<div id="welcome" class="welcome"><h1>今天想做什么？</h1></div>';
         if ($("currentTitle")) $("currentTitle").textContent = "新对话";
         activeMode = "auto";
         pendingMaterial = "";
@@ -2322,7 +2360,6 @@ function selectMode(mode, options = {}) {
     if ($("paperStatus")) $("paperStatus").hidden = true;
     // 自动模式下保留欢迎页：它是「可以直接提问」的说明，不是必须点掉的选功能墙。
     if (mode !== "auto" && !options.keepWelcome && $("welcome")) $("welcome").remove();
-    if ($("modeBar")) $("modeBar").hidden = false;
     if ($("activeModeName")) $("activeModeName").textContent = info.name;
     if ($("activeModeIcon")) $("activeModeIcon").textContent = info.icon;
     if ($("contextName")) {
@@ -2340,7 +2377,7 @@ function selectMode(mode, options = {}) {
     if ($("uploadPaperBtn")) $("uploadPaperBtn").hidden = mode !== "paper" || !$("paperInput")?.files?.length;
     // 自动模式不预先建会话、不播开场白：用户可能只是打开页面看一眼，
     // 先在库里留一个空会话，之后「对话记录」里会多出一排点开什么都没有的条目。
-    if (mode === "auto") return;
+    if (mode === "auto") { updateModeBar(); return; }
     if (mode === "file") {
         loadFiles();
         if ($("fileInput")?.files?.length) uploadFile();
@@ -2348,6 +2385,7 @@ function selectMode(mode, options = {}) {
     if (mode === "paper") checkPaperStatus();
     if (!currentChatId) ensureChatId().catch(error => showModeStatus(error.message, "error"));
     if (!$("chat").querySelector(".user, .ai")) addMessage("ai", info.greeting);
+    updateModeBar();
 }
 
 function toggleModePicker() {
@@ -3019,6 +3057,8 @@ document.addEventListener(
         document.addEventListener("click", event => {
             const history = $("historyPanel");
             if (history && !history.hidden && !history.contains(event.target) && !$("historyToggle")?.contains(event.target)) history.hidden = true;
+            const picker = $("modePicker");
+            if (picker && !picker.hidden && !picker.contains(event.target)) picker.hidden = true;
         });
         document.addEventListener("keydown", event => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); newChat(); }
@@ -3033,6 +3073,7 @@ document.addEventListener(
         welcomeTemplate = $("welcome") ? $("welcome").outerHTML : "";
         selectMode("auto", { keepWelcome: true });
         watchEmptyState();
+        watchModeBar();
         checkAuthentication();
 
     }

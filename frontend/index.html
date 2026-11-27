@@ -32,16 +32,12 @@
         <div class="welcome-orb"><i></i><i></i><i></i></div>
         <div class="eyebrow">YOUR THINKING PARTNER</div>
         <h1>今天想做什么？</h1>
-        <p>直接说就行。要读文件、读论文，还是只是聊聊，我自己判断。</p>
       </div>
     </section>
 
     <footer class="composer-wrap">
       <div id="modeBar" class="mode-bar" hidden>
-        <button id="activeModeButton" class="active-mode" onclick="toggleModePicker()"><span id="activeModeIcon">✳</span><span id="activeModeName">智能对话</span><span class="mode-chevron">⌄</span></button>
-        <div id="modePicker" class="mode-picker" hidden>
-          <button onclick="selectMode('auto')">✦　自动选择</button><button onclick="selectMode('chat')">✳　智能对话</button><button onclick="selectMode('file')">▤　文件问答</button><button onclick="selectMode('paper')">论　论文助手</button>
-        </div>
+        <button id="activeModeButton" class="active-mode" hidden onclick="toggleModePicker()"><span id="activeModeIcon">✳</span><span id="activeModeName">智能对话</span><span class="mode-chevron">⌄</span></button>
         <span id="contextName" class="context-name"></span>
         <div class="mode-actions">
           <label id="filePickerLabel" class="attach-button" for="fileInput" hidden>＋ 添加资料</label>
@@ -64,6 +60,11 @@
     </footer>
     <div class="sidebar-footer"><span id="serviceDot" class="status-dot"></span><span id="serviceLabel">正在连接服务…</span><a href="debug.html" target="_blank" rel="noopener">连接诊断</a></div>
   </main>
+  <!-- 模式菜单挂在 body 下：它由消息下方的「自动 · 文件问答」标签唤起，
+       不能再跟着 modeBar 一起隐藏，位置由 JS 按标签位置算。 -->
+  <div id="modePicker" class="mode-picker" hidden>
+    <button onclick="selectMode('auto')">✦　自动选择</button><button onclick="selectMode('chat')">✳　智能对话</button><button onclick="selectMode('file')">▤　文件问答</button><button onclick="selectMode('paper')">论　论文助手</button>
+  </div>
   <dialog id="learningHub" class="learning-hub">
     <div class="learning-head"><div><span class="eyebrow">YOUR LEARNING SPACE</span><h2>学习档案</h2><p>由你确认保存的长期记忆与学习计划会用于个性化回答。</p></div><button class="hub-close" onclick="closeLearningHub()" aria-label="关闭">×</button></div>
     <div class="learning-grid">
