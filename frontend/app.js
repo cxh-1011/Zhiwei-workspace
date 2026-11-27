@@ -3059,10 +3059,12 @@ document.addEventListener(
             if (history && !history.hidden && !history.contains(event.target) && !$("historyToggle")?.contains(event.target)) history.hidden = true;
             const picker = $("modePicker");
             if (picker && !picker.hidden && !picker.contains(event.target)) picker.hidden = true;
+            const tool = $("toolMenu");
+            if (tool && !tool.hidden && !tool.contains(event.target) && !$("toolMenuBtn")?.contains(event.target)) closeToolMenu();
         });
         document.addEventListener("keydown", event => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); newChat(); }
-            if (event.key === "Escape") { toggleHistory(false); if ($("modePicker")) $("modePicker").hidden = true; }
+            if (event.key === "Escape") { toggleHistory(false); if ($("modePicker")) $("modePicker").hidden = true; closeToolMenu(); }
         });
 
 
@@ -3285,6 +3287,44 @@ function syncExpertButton() {
     button.setAttribute("aria-pressed", state === "on" ? "true" : "false");
     const label = $("expertLabel");
     if (label) label.textContent = state === "partial" ? "专家模式 · 部分" : "专家模式";
+    syncToolButton();
+}
+
+// 「⋯」上的小圆点：菜单关着的时候也得能看出有开关处于打开状态，
+// 否则把专家模式收进菜单等于把它藏起来了——用户会忘了昨晚开着桌面控制。
+function syncToolButton() {
+    const button = $("toolMenuBtn");
+    if (!button) return;
+    const open = (expertState() !== "off" ? 1 : 0) + (allowDesktop ? 1 : 0);
+    button.dataset.state = open === 0 ? "off" : (open === 2 ? "on" : "partial");
+}
+
+function toggleToolMenu(event) {
+    // 不让这次点击冒到 document 上，否则刚打开就被「点别处收起」关掉。
+    if (event) event.stopPropagation();
+    const menu = $("toolMenu");
+    const button = $("toolMenuBtn");
+    if (!menu || !button) return;
+    if (!menu.hidden) {
+        closeToolMenu();
+        return;
+    }
+    const rect = button.getBoundingClientRect();
+    menu.hidden = false;
+    // 先显示再量：offsetWidth 要在布局之后才准，宽度按菜单真实尺寸算，
+    // 320 宽屏上菜单比按钮宽得多，靠右时要往回收。
+    const width = menu.offsetWidth || 240;
+    const height = menu.offsetHeight || 92;
+    menu.style.left = Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - width - 10))) + "px";
+    menu.style.top = Math.round(Math.max(8, rect.top - height - 8)) + "px";
+    button.setAttribute("aria-expanded", "true");
+}
+
+function closeToolMenu() {
+    const menu = $("toolMenu");
+    const button = $("toolMenuBtn");
+    if (menu) menu.hidden = true;
+    if (button) button.setAttribute("aria-expanded", "false");
 }
 
 // ---------- 操作桌面 ----------
@@ -3299,6 +3339,7 @@ function syncDesktopButton() {
     button.setAttribute("aria-pressed", allowDesktop ? "true" : "false");
     const label = $("desktopLabel");
     if (label) label.textContent = allowDesktop ? "操作桌面 · 已开" : "操作桌面";
+    syncToolButton();
 }
 
 function toggleDesktopMode() {
@@ -3330,13 +3371,16 @@ function toggleExpertMode() {
         item.apply();
     });
     syncExpertButton();
-    showExpertNote(turnOn);
+    // 菜单开着时，右侧那列「开 / 部分」已经给了反馈，提示条会被菜单压住，就不弹了。
+    if ($("toolMenu")?.hidden !== false) showExpertNote(turnOn);
 }
 
 let expertNoteTimer = 0;
 
 function showExpertNote(turnOn) {
-    const host = $("expertToggle")?.parentElement;
+    // 提示条挂在「⋯」所在的底部行里（绝对定位到 composer-wrap 上方），而不是菜单里——
+    // 菜单是个 fixed 浮层，把提示塞进去会跟着菜单一起消失。
+    const host = $("toolMenuBtn")?.parentElement;
     if (!host) return;
     let note = $("expertNote");
     if (!turnOn) {
