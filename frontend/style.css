@@ -185,3 +185,32 @@
 .app-shell.is-empty .welcome{margin:0 auto 22px}
 .app-shell.is-empty .composer-wrap{margin-bottom:auto}
 @media(max-width:600px){.app-shell.is-empty .conversation{padding:0 12px}.app-shell.is-empty .welcome{margin-bottom:16px}}
+/* 窄屏收口：320~390 宽度下底部那行放不下四样东西（提示语 + 专家模式 + 操作桌面 + 发送），
+   flex-wrap 会把「操作桌面」挤到第二行、把「发送」压成竖排两字，整个输入区从 125px 涨到 144px。
+   手机上本来也没有 Enter 键，所以先撤掉提示语，再锁住按钮不换行。 */
+.send-button{white-space:nowrap;flex:0 0 auto}
+@media(max-width:380px){
+  .composer-left{flex-wrap:nowrap}
+  .composer-left .composer-hint{display:none}
+  .expert-toggle{padding:0 6px}
+  .send-button{gap:8px;padding:0 6px 0 10px}
+  /* app.js 把内联高度卡在 160，小屏上 160 + 底部那行要吃掉 44% 视口，
+     弹出键盘后基本没地方看回答；这里用 max-height 截到 120，内联值仍由脚本管，滚动照旧 */
+  .composer textarea{max-height:120px}
+}
+/* 顶栏同理：五个图标 + 品牌 + 模型名在 320 下会溢出 89px，模型名被裁成「qwen-plu…」。
+   按档削：先压按钮宽度和间距（414 起本来不溢出），到 375 及以下才把模型名收成状态圆点。
+   模型名是纯展示，点开面板仍看得到全名；按钮是功能入口，不能缩到点不准。 */
+@media(max-width:430px){
+  .topbar-actions{gap:2px}
+  .top-action{width:30px}
+  .brand small{display:none}
+}
+@media(max-width:380px){
+  .model-pill{padding:4px 6px}
+  .model-pill #modelPillText{display:none}
+}
+@media(max-width:340px){
+  .topbar-actions{gap:1px}
+  .top-action{width:28px}
+}
