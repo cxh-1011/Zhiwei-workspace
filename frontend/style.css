@@ -34,7 +34,7 @@
 .send-button.stopping .send-arrow{font-size:9px}
 
 /* 模型与 API Key 面板 */
-.model-pill{background:#fff;cursor:pointer;font:inherit;color:#686e79}
+.model-pill{background:#fff;cursor:pointer;font-family:inherit;color:#686e79}
 .model-pill:hover{border-color:#d7daf0;background:#fafaff;color:#4d5563}
 .model-pill.warn{border-color:#f0dada;background:#fff7f7;color:#a84949}
 .model-pill.warn .model-dot{background:#d76c6c}
@@ -214,3 +214,11 @@
   .topbar-actions{gap:1px}
   .top-action{width:28px}
 }
+/* 无 hover 的设备（手机、平板）等不到「悬停」，.chat-item button 的 opacity:0 会让删除键
+   一直不出现，只有切进该会话（.active）才冒出来——等于要先点进去才能删。常显并给足面积。
+   用 (hover:none) 而不是宽度判断：带触屏的笔记本仍能悬停，不该跟着变。 */
+@media(hover:none){
+  .chat-item button{width:32px;height:32px;padding:0;opacity:1}
+}
+/* 横屏时刘海会压住内容两侧：inset 为 0 时这两条声明不产生任何变化 */
+.app-shell{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
