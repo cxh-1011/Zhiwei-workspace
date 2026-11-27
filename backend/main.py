@@ -42,6 +42,7 @@ import projects as projects_lib
 import checks as checks_lib
 import runtimes as runtimes_lib
 import envs as envs_lib
+import router as router_lib
 import model_store
 from tools.edits import restore_edits
 
@@ -426,6 +427,36 @@ def _persist_chat(chat_id: int, question: str, result: dict) -> None:
     save_message(chat_id, "user", question)
     save_message(chat_id, "ai", result["reply"])
     save_agent_run(chat_id, question, result)
+
+
+class RouteRequest(BaseModel):
+    """判断这一句话该走哪条链路。只带判断需要的三个事实，不传整段历史。
+
+    has_file 是「已上传且可用」，不是「选了个本地文件」——后者还没上传，
+    按文件问答发过去只会在后端 404。这个区分放在前端做，因为它才知道
+    fileName 与 knownFiles 是否对得上。
+    """
+
+    text: str = Field("", max_length=4000)
+    has_file: StrictBool = False
+    paper_ready: StrictBool = False
+    filename: str = Field("", max_length=200)
+
+
+@app.post("/route")
+def route_message(data: RouteRequest):
+    """自动选功能：返回 chat / file / paper，以及缺什么材料。
+
+    单独一个接口而不是塞进 /chat：判断要能在发送之前完成——需要材料时前端
+    应该先提示上传，而不是先把这句话发进一条注定失败的链路。也不带 chat_id：
+    判断与「在哪个会话里」无关，多一个必填参数只会让前端多传一次。
+    """
+    return router_lib.decide(
+        data.text,
+        has_file=bool(data.has_file),
+        paper_ready=bool(data.paper_ready),
+        filename=data.filename,
+    )
 
 
 @app.post("/chat")

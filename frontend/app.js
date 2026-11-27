@@ -9,6 +9,9 @@ let currentChatId = null;
 let chatCreation = null;
 let knownFiles = new Set();
 let paperReady = false;
+// 首页欢迎页的原始结构。新建对话时用它复原，避免在 JS 里再抄一份文案
+// （抄一份就会和 index.html 慢慢分叉，改了一处另一处还是旧的）。
+let welcomeTemplate = "";
 // 是否允许助手写入学习档案（长期记忆 / 勾选任务）。默认关闭。
 let allowWrites = false;
 // 是否允许助手只读访问工作区代码。默认关闭。
@@ -481,7 +484,9 @@ function showSelectedFile(inputId, hintId) {
     if (inputId === "fileInput") {
         if ($("fileName")) $("fileName").value = file.name;
         if ($("contextName")) $("contextName").textContent = file.name;
-        if (activeMode === "file") uploadFile();
+        // 自动模式下也会走到这里：用户是因为「缺材料」被提示去选的，
+        // 选完就该直接上传，不该再让他找一次「上传资料」按钮。
+        if (activeMode === "file" || activeMode === "auto") uploadFile();
     } else if (inputId === "paperInput") {
         paperReady = false;
         if ($("contextName")) $("contextName").textContent = file.name;
@@ -1579,7 +1584,7 @@ function finalizeStream(box, live, answer, event, buffer, question) {
 
     }
 
-    if (activeMode === "chat" && isMusicReply(reply)) {
+    if ((activeMode === "chat" || activeMode === "auto") && isMusicReply(reply)) {
 
         answer.innerHTML = createMusicCard(reply);
 
@@ -1661,6 +1666,63 @@ function finalizeStream(box, live, answer, event, buffer, question) {
 }
 
 
+// 「上次因为缺材料被拦下」记住是哪种材料：用户补完再发时按那种处理。
+// 否则「总结一下」这种没有指代的话，传完文件仍会被判成普通对话，白传一次。
+let pendingMaterial = "";
+
+async function resolveRoute(text, filename) {
+    const hasFile = Boolean(filename) && knownFiles.has(filename);
+    try {
+        return await apiJson("/route", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                text: text,
+                has_file: hasFile,
+                paper_ready: Boolean(paperReady),
+                filename: filename
+            })
+        });
+    } catch (error) {
+        // 路由接口挂了不能拦着用户提问。按最容易解释的规则兜底：
+        // 已经选了文件就发文件问答，否则普通对话。手动切换仍然有效。
+        return { mode: hasFile ? "file" : "chat", need: "", reason: "", auto: true, fallback: true };
+    }
+}
+
+// 需要材料时只提示并打开选择框，不把这句话发出去——发过去后端也只会回一句
+// 「请选择有效的上传文件」，等于让他重新说一遍。
+function askForMaterial(kind, reason) {
+    pendingMaterial = kind;
+    if (kind === "file") {
+        if ($("filePickerLabel")) $("filePickerLabel").hidden = false;
+        loadFiles();
+    } else if ($("paperPickerLabel")) {
+        $("paperPickerLabel").hidden = false;
+    }
+    // 只说这句缺什么，不要再拼一句「先选一份资料」——router 给的理由已经说过了，
+    // 拼起来会变成「先添加文件：先选一份资料」，读着像两个人各说一遍。
+    showModeStatus((reason || "这一步需要材料") + "；准备好后我再发这句话。", "error");
+    const picker = $(kind === "file" ? "fileInput" : "paperInput");
+    if (picker) picker.click();
+}
+
+// 自动判断的结果要露出来，不能悄悄替他选：判错了得让他一眼看见并改掉。
+function addRouteTag(mode, reason) {
+    const chat = $("chat");
+    const info = MODE_INFO[mode];
+    if (!chat || !info || mode === "chat") return;
+    const tag = document.createElement("div");
+    tag.className = "route-tag";
+    tag.textContent = "自动 · " + info.name + (reason ? " · " + reason : "");
+    tag.title = "点一下可以改成别的功能";
+    tag.addEventListener("click", () => {
+        selectMode(mode);
+        if ($("modePicker")) $("modePicker").hidden = false;
+    });
+    chat.appendChild(tag);
+}
+
 async function sendMessage() {
 
     if (activeStream) return;
@@ -1674,15 +1736,37 @@ async function sendMessage() {
     if (!text) return;
 
     const selectedFilename = $("fileName")?.value?.trim() || "";
-    if (activeMode === "file" && !selectedFilename) {
+
+    let mode = activeMode;
+    let decision = null;
+
+    if (mode === "auto") {
+        decision = await resolveRoute(text, selectedFilename);
+        if (decision.need === "file" || decision.need === "paper") {
+            askForMaterial(decision.need, decision.reason);
+            return;
+        }
+        mode = decision.mode || "chat";
+        // 刚才为了这句话补材料的那一类优先。只在这一轮生效，
+        // 清掉之后下一句照常按内容判断。
+        if (pendingMaterial === "file" && selectedFilename && knownFiles.has(selectedFilename)) {
+            mode = "file";
+            pendingMaterial = "";
+        } else if (pendingMaterial === "paper" && paperReady) {
+            mode = "paper";
+            pendingMaterial = "";
+        }
+    }
+
+    if (mode === "file" && !selectedFilename) {
         showModeStatus("请先添加资料，或从已上传资料中选择一个文件。", "error");
         return;
     }
-    if (activeMode === "file" && !knownFiles.has(selectedFilename)) {
+    if (mode === "file" && !knownFiles.has(selectedFilename)) {
         showModeStatus("这份资料还没有上传，请先点击“上传资料”。", "error");
         return;
     }
-    if (activeMode === "paper" && !paperReady) {
+    if (mode === "paper" && !paperReady) {
         showModeStatus("请先选择并解析一篇 PDF 论文。", "error");
         return;
     }
@@ -1693,6 +1777,7 @@ async function sendMessage() {
 
     // 显示用户消息
     addMessage("user", text);
+    if (decision && !decision.fallback) addRouteTag(mode, decision.reason);
 
     input.value = "";
     input.style.height = "auto";
@@ -1748,8 +1833,8 @@ async function sendMessage() {
             {
                 text: text,
                 chat_id: chatId,
-                mode: activeMode || "chat",
-                filename: activeMode === "file" ? selectedFilename : null,
+                mode: mode,
+                filename: mode === "file" ? selectedFilename : null,
                 allow_writes: allowWrites,
                 allow_workspace: allowWorkspace,
                 allow_code_edit: allowCodeEdit,
@@ -2182,12 +2267,14 @@ function clearChat() {
 
         if ($("currentTitle")) $("currentTitle").textContent = "新对话";
 
-        box.innerHTML = '<div id="welcome" class="welcome"><div class="welcome-orb"><i></i><i></i><i></i></div><div class="eyebrow">YOUR THINKING PARTNER</div><h1>你好，今天想用 AI 做什么？</h1><p>先选择一个功能，接下来的提问和回答都会在这里进行。</p><div class="mode-grid"><button class="mode-card" onclick="selectMode(\'chat\')"><span class="mode-icon blue">✳</span><span><b>智能对话</b><small>自由提问、灵感探索与音乐推荐</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'file\')"><span class="mode-icon purple">▤</span><span><b>文件问答</b><small>上传文档或图片，提取文字并理解图像</small></span><span class="mode-arrow">↗</span></button><button class="mode-card" onclick="selectMode(\'paper\')"><span class="mode-icon amber">论</span><span><b>论文助手</b><small>解析 PDF 论文，检索内容并深入讨论</small></span><span class="mode-arrow">↗</span></button></div></div>';
-        activeMode = null;
-        if ($("modeBar")) $("modeBar").hidden = true;
-        if ($("input")) { $("input").disabled = true; $("input").placeholder = "先选择一个功能…"; $("input").value = ""; }
-        if ($("sendBtn")) $("sendBtn").disabled = true;
-        if ($("composerHint")) $("composerHint").textContent = "选择功能后即可开始";
+        // 欢迎页不再让用户先选功能，直接给一个能打字的输入框。
+        // 模板在启动时从页面里存一份，改文案只改 index.html 一处。
+        box.innerHTML = welcomeTemplate || '<div id="welcome" class="welcome"><h1>你好，今天想用 AI 做什么？</h1><p>直接说你想做什么，我会自己判断该读文件、读论文还是普通对话。</p></div>';
+        if ($("currentTitle")) $("currentTitle").textContent = "新对话";
+        activeMode = "auto";
+        pendingMaterial = "";
+        if ($("input")) $("input").value = "";
+        selectMode("auto", { keepWelcome: true });
         if ($("filePickerLabel")) $("filePickerLabel").hidden = true;
         if ($("paperPickerLabel")) $("paperPickerLabel").hidden = true;
         if ($("paperStatus")) $("paperStatus").hidden = true;
@@ -2199,20 +2286,23 @@ function clearChat() {
 
 }
 
-let activeMode = null;
+// 默认自动：用户不用先选功能。手动指定仍然保留，选中后本次会话就不再来回判断。
+let activeMode = "auto";
 
 const MODE_INFO = {
+    auto: { name: "自动选择", icon: "✦", placeholder: "直接提问，我来判断用哪个功能…", hint: "Enter 发送 · 自动选择功能", greeting: "" },
     chat: { name: "智能对话", icon: "✳", placeholder: "发送消息…", hint: "Enter 发送 · Shift + Enter 换行", greeting: "你好，我可以陪你一起探索问题、整理思路，也可以根据你的心情推荐音乐。" },
     file: { name: "文件问答", icon: "▤", placeholder: "针对这份资料或图片提问…", hint: "支持 PDF、DOCX、TXT、JPG、PNG、WEBP；图片最大 10 MB", greeting: "请先添加或选择一份资料或图片，然后告诉我你想了解什么。" },
     paper: { name: "论文助手", icon: "论", placeholder: "询问论文内容…", hint: "回答将基于已解析的论文内容", greeting: "请先选择并解析一篇 PDF 论文，再开始提问。" }
 };
 
-function selectMode(mode) {
+function selectMode(mode, options = {}) {
     const info = MODE_INFO[mode];
     if (!info) return;
     activeMode = mode;
     if ($("paperStatus")) $("paperStatus").hidden = true;
-    if ($("welcome")) $("welcome").remove();
+    // 自动模式下保留欢迎页：它是「可以直接提问」的说明，不是必须点掉的选功能墙。
+    if (mode !== "auto" && !options.keepWelcome && $("welcome")) $("welcome").remove();
     if ($("modeBar")) $("modeBar").hidden = false;
     if ($("activeModeName")) $("activeModeName").textContent = info.name;
     if ($("activeModeIcon")) $("activeModeIcon").textContent = info.icon;
@@ -2229,6 +2319,9 @@ function selectMode(mode) {
     if ($("paperPickerLabel")) $("paperPickerLabel").hidden = mode !== "paper";
     if ($("uploadFileBtn")) $("uploadFileBtn").hidden = mode !== "file" || !$("fileInput")?.files?.length;
     if ($("uploadPaperBtn")) $("uploadPaperBtn").hidden = mode !== "paper" || !$("paperInput")?.files?.length;
+    // 自动模式不预先建会话、不播开场白：用户可能只是打开页面看一眼，
+    // 先在库里留一个空会话，之后「对话记录」里会多出一排点开什么都没有的条目。
+    if (mode === "auto") return;
     if (mode === "file") {
         loadFiles();
         if ($("fileInput")?.files?.length) uploadFile();
@@ -2916,6 +3009,10 @@ document.addEventListener(
 
         // 认证通过后才加载任何聊天、文件或论文信息。
         restoreAllowWrites();
+        // 默认就进「自动选择」：输入框可打字，不需要先点卡片。
+        // 存一份欢迎页结构，新建对话时复原用。
+        welcomeTemplate = $("welcome") ? $("welcome").outerHTML : "";
+        selectMode("auto", { keepWelcome: true });
         checkAuthentication();
 
     }
